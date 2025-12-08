@@ -29,11 +29,13 @@ typedef struct {
     // Selection state
     gboolean selection_active;
     gboolean is_dragging;
+    gboolean is_moving_selection;
     double start_x, start_y; // Widget coords
     double curr_x, curr_y;   // Widget coords
 
     // Selected region in image coordinates (pixels)
     int sel_x1, sel_y1, sel_x2, sel_y2;
+    int sel_orig_x1, sel_orig_y1, sel_orig_x2, sel_orig_y2;
 
     // UI Widgets
     GtkWidget *spin_min;
@@ -246,24 +248,32 @@ draw_selection_func (GtkDrawingArea *area,
 {
     ViewerApp *app = (ViewerApp *)user_data;
 
-    if (!app->is_dragging && !app->selection_active) return;
+    if (!app->is_dragging && !app->selection_active && !app->is_moving_selection) return;
 
     double x1, y1, x2, y2;
+    double offset_x, offset_y, scale;
+    get_image_screen_geometry(app, &offset_x, &offset_y, &scale);
 
-    if (app->is_dragging) {
+    if (app->is_moving_selection) {
+        // Use current modified position
+        x1 = app->sel_x1 * scale + offset_x;
+        y1 = app->sel_y1 * scale + offset_y;
+        x2 = app->sel_x2 * scale + offset_x;
+        y2 = app->sel_y2 * scale + offset_y;
+        x2 += scale;
+        y2 += scale;
+    } else if (app->is_dragging) {
+        // Drawing new selection
         x1 = app->start_x;
         y1 = app->start_y;
         x2 = app->curr_x;
         y2 = app->curr_y;
     } else {
         // Convert image coords back to widget coords for display
-        double offset_x, offset_y, scale;
-        get_image_screen_geometry(app, &offset_x, &offset_y, &scale);
         x1 = app->sel_x1 * scale + offset_x;
         y1 = app->sel_y1 * scale + offset_y;
         x2 = app->sel_x2 * scale + offset_x;
         y2 = app->sel_y2 * scale + offset_y;
-        // Adjust for inclusive pixel range if desired, but simple mapping is usually fine visually
         x2 += scale; // Make it cover the pixel
         y2 += scale;
     }
@@ -286,11 +296,32 @@ drag_begin (GtkGestureDrag *gesture,
             gpointer        user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    app->is_dragging = TRUE;
+    int ix, iy;
+    widget_to_image_coords(app, x, y, &ix, &iy);
+
+    // Check if clicking inside existing selection
+    if (app->selection_active &&
+        ix >= app->sel_x1 && ix <= app->sel_x2 &&
+        iy >= app->sel_y1 && iy <= app->sel_y2) {
+
+        app->is_moving_selection = TRUE;
+        app->is_dragging = FALSE;
+        app->sel_orig_x1 = app->sel_x1;
+        app->sel_orig_y1 = app->sel_y1;
+        app->sel_orig_x2 = app->sel_x2;
+        app->sel_orig_y2 = app->sel_y2;
+    } else {
+        app->is_moving_selection = FALSE;
+        app->is_dragging = TRUE;
+        app->selection_active = FALSE; // Clear old
+    }
+
     app->start_x = x;
     app->start_y = y;
     app->curr_x = x;
     app->curr_y = y;
+
+    app->force_redraw = TRUE;
     gtk_widget_queue_draw(app->selection_area);
 }
 
@@ -301,8 +332,36 @@ drag_update (GtkGestureDrag *gesture,
              gpointer        user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    app->curr_x = app->start_x + offset_x;
-    app->curr_y = app->start_y + offset_y;
+
+    if (app->is_moving_selection) {
+        double off_x, off_y, scale;
+        get_image_screen_geometry(app, &off_x, &off_y, &scale);
+
+        int idx = (int)(offset_x / scale);
+        int idy = (int)(offset_y / scale);
+
+        int w = app->sel_orig_x2 - app->sel_orig_x1;
+        int h = app->sel_orig_y2 - app->sel_orig_y1;
+        int img_w = app->image->md->size[0];
+        int img_h = app->image->md->size[1];
+
+        app->sel_x1 = app->sel_orig_x1 + idx;
+        app->sel_y1 = app->sel_orig_y1 + idy;
+
+        // Clamp
+        if (app->sel_x1 < 0) app->sel_x1 = 0;
+        if (app->sel_y1 < 0) app->sel_y1 = 0;
+        if (app->sel_x1 + w >= img_w) app->sel_x1 = img_w - 1 - w;
+        if (app->sel_y1 + h >= img_h) app->sel_y1 = img_h - 1 - h;
+
+        app->sel_x2 = app->sel_x1 + w;
+        app->sel_y2 = app->sel_y1 + h;
+
+        app->force_redraw = TRUE; // Update scaling live
+    } else if (app->is_dragging) {
+        app->curr_x = app->start_x + offset_x;
+        app->curr_y = app->start_y + offset_y;
+    }
     gtk_widget_queue_draw(app->selection_area);
 }
 
@@ -313,24 +372,30 @@ drag_end (GtkGestureDrag *gesture,
           gpointer        user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    app->is_dragging = FALSE;
-    app->curr_x = app->start_x + offset_x;
-    app->curr_y = app->start_y + offset_y;
 
-    // If drag is very small, maybe treat as clear?
-    if (fabs(offset_x) < 2 && fabs(offset_y) < 2) {
-        app->selection_active = FALSE;
-    } else {
-        app->selection_active = TRUE;
+    if (app->is_moving_selection) {
+        app->is_moving_selection = FALSE;
+        app->selection_active = TRUE; // Ensure it stays active
+    } else if (app->is_dragging) {
+        app->is_dragging = FALSE;
+        app->curr_x = app->start_x + offset_x;
+        app->curr_y = app->start_y + offset_y;
 
-        int ix1, iy1, ix2, iy2;
-        widget_to_image_coords(app, app->start_x, app->start_y, &ix1, &iy1);
-        widget_to_image_coords(app, app->curr_x, app->curr_y, &ix2, &iy2);
+        // If drag is very small, maybe treat as clear?
+        if (fabs(offset_x) < 2 && fabs(offset_y) < 2) {
+            app->selection_active = FALSE;
+        } else {
+            app->selection_active = TRUE;
 
-        app->sel_x1 = (ix1 < ix2) ? ix1 : ix2;
-        app->sel_x2 = (ix1 < ix2) ? ix2 : ix1;
-        app->sel_y1 = (iy1 < iy2) ? iy1 : iy2;
-        app->sel_y2 = (iy1 < iy2) ? iy2 : iy1;
+            int ix1, iy1, ix2, iy2;
+            widget_to_image_coords(app, app->start_x, app->start_y, &ix1, &iy1);
+            widget_to_image_coords(app, app->curr_x, app->curr_y, &ix2, &iy2);
+
+            app->sel_x1 = (ix1 < ix2) ? ix1 : ix2;
+            app->sel_x2 = (ix1 < ix2) ? ix2 : ix1;
+            app->sel_y1 = (iy1 < iy2) ? iy1 : iy2;
+            app->sel_y2 = (iy1 < iy2) ? iy2 : iy1;
+        }
     }
 
     app->force_redraw = TRUE;

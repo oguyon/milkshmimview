@@ -22,6 +22,9 @@ typedef struct {
     double current_min;
     double current_max;
 
+    // Control flags
+    gboolean force_redraw;
+
     // UI Widgets
     GtkWidget *spin_min;
     GtkWidget *check_min_auto;
@@ -73,6 +76,7 @@ on_auto_min_toggled (GtkCheckButton *btn, gpointer user_data)
     gboolean is_auto = gtk_check_button_get_active(btn);
     app->fixed_min = !is_auto;
     gtk_widget_set_sensitive(app->spin_min, !is_auto);
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -82,6 +86,7 @@ on_auto_max_toggled (GtkCheckButton *btn, gpointer user_data)
     gboolean is_auto = gtk_check_button_get_active(btn);
     app->fixed_max = !is_auto;
     gtk_widget_set_sensitive(app->spin_max, !is_auto);
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -89,6 +94,7 @@ on_spin_min_changed (GtkSpinButton *spin, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->min_val = gtk_spin_button_get_value(spin);
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -96,6 +102,7 @@ on_spin_max_changed (GtkSpinButton *spin, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->max_val = gtk_spin_button_get_value(spin);
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -104,6 +111,7 @@ on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_min_auto), TRUE);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_max_auto), TRUE);
+    app->force_redraw = TRUE;
 }
 
 // Drawing function for colorbar
@@ -115,14 +123,6 @@ draw_colorbar_func (GtkDrawingArea *area,
                     gpointer        user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-
-    // Background (optional, white/gray)
-    // cairo_set_source_rgb(cr, 0.9, 0.9, 0.9);
-    // cairo_paint(cr);
-
-    // Draw Gradient
-    // We want a vertical gradient from bottom (black) to top (white)
-    // Or maybe just a narrow strip
 
     int bar_width = 20;
     int bar_x = (width - bar_width) / 2;
@@ -240,6 +240,14 @@ draw_image (ViewerApp *app)
         gtk_widget_queue_draw(app->colorbar);
     }
 
+    // Update spin buttons if in auto mode so user sees the range
+    if (!app->fixed_min && app->spin_min) {
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_min), min_val);
+    }
+    if (!app->fixed_max && app->spin_max) {
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_max), max_val);
+    }
+
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             int idx = y * width + x;
@@ -298,12 +306,13 @@ update_display (gpointer user_data)
 
     static uint64_t last_cnt0 = 0;
 
-    if (app->image->md->cnt0 != last_cnt0) {
+    if (app->image->md->cnt0 != last_cnt0 || app->force_redraw) {
         if (app->image->md->write) {
              return G_SOURCE_CONTINUE;
         }
 
         last_cnt0 = app->image->md->cnt0;
+        app->force_redraw = FALSE;
         draw_image(app);
     }
 

@@ -26,12 +26,19 @@ typedef struct {
     // Control flags
     gboolean force_redraw;
 
-    // Selection state
+    // Selection state (Left Click)
     gboolean selection_active;
     gboolean is_dragging;
     gboolean is_moving_selection;
     double start_x, start_y; // Widget coords
     double curr_x, curr_y;   // Widget coords
+
+    // Contrast Adjustment state (Right Click)
+    gboolean is_adjusting_contrast;
+    double contrast_start_min;
+    double contrast_start_max;
+    double contrast_start_x;
+    double contrast_start_y;
 
     // Selected region in image coordinates (pixels)
     int sel_x1, sel_y1, sel_x2, sel_y2;
@@ -50,6 +57,15 @@ typedef struct {
     GtkWidget *btn_fit_window;
     GtkWidget *dropdown_zoom;
     GtkWidget *lbl_zoom;
+
+    // Stats Widgets
+    GtkWidget *box_stats;
+    GtkWidget *lbl_stat_min;
+    GtkWidget *lbl_stat_max;
+    GtkWidget *lbl_stat_mean;
+    GtkWidget *lbl_stat_median;
+    GtkWidget *lbl_stat_p01;
+    GtkWidget *lbl_stat_p09;
 } ViewerApp;
 
 // Command line option variables
@@ -91,6 +107,7 @@ static GOptionEntry entries[] =
 // Forward decl
 static void update_zoom_layout(ViewerApp *app);
 static void get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale);
+static void widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy);
 
 // UI Callbacks
 static void
@@ -117,6 +134,8 @@ static void
 on_spin_min_changed (GtkSpinButton *spin, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
+    // Only update if not currently being updated by code to avoid feedback loops if needed,
+    // but here we just accept value.
     app->min_val = gtk_spin_button_get_value(spin);
     app->force_redraw = TRUE;
 }
@@ -156,6 +175,7 @@ on_btn_reset_selection_clicked (GtkButton *btn, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     app->selection_active = FALSE;
     app->force_redraw = TRUE;
+    gtk_widget_set_visible(app->box_stats, FALSE);
     gtk_widget_queue_draw(app->selection_area);
 }
 
@@ -271,17 +291,8 @@ get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, do
         int_off_x = (widget_w - display_w) / 2.0;
         int_off_y = (widget_h - display_h) / 2.0;
     } else {
-        // In Fixed Zoom, we set size request.
-        // We use scaling based on zoom factor.
         *scale = app->zoom_factor;
 
-        // If widget is larger than image (zoomed out), image is centered by GtkPicture alignment.
-        // If image is larger (zoomed in), widget expands and is inside scrolled window.
-        // However, GtkPicture calculates alignment based on allocation.
-        // If we set CONTENT_FIT_CONTAIN, it will scale down if allocated smaller,
-        // but ScrolledWindow should allow it to be full size.
-
-        // Recalculate offset if centered
         double display_w = img_w * (*scale);
         double display_h = img_h * (*scale);
 
@@ -338,8 +349,6 @@ update_zoom_layout(ViewerApp *app) {
         int req_w = (int)(img_w * app->zoom_factor);
         int req_h = (int)(img_h * app->zoom_factor);
 
-        // Use CONTAIN to prevent distortion if allocated size is weird,
-        // but rely on size request to force correct size.
         gtk_picture_set_content_fit(GTK_PICTURE(app->picture), GTK_CONTENT_FIT_CONTAIN);
         gtk_widget_set_size_request(app->picture, req_w, req_h);
 
@@ -483,7 +492,7 @@ draw_selection_func (GtkDrawingArea *area,
     cairo_stroke(cr);
 }
 
-// Gesture callbacks
+// Gesture callbacks (Left Click: ROI)
 static void
 drag_begin (GtkGestureDrag *gesture,
             double          x,
@@ -491,33 +500,64 @@ drag_begin (GtkGestureDrag *gesture,
             gpointer        user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    int ix, iy;
-    widget_to_image_coords(app, x, y, &ix, &iy);
 
-    // Check if clicking inside existing selection
-    if (app->selection_active &&
-        ix >= app->sel_x1 && ix <= app->sel_x2 &&
-        iy >= app->sel_y1 && iy <= app->sel_y2) {
+    // We handle Left Click in this controller.
+    // If we added a separate controller for Right Click, this callback might be shared or separate.
+    // GtkGestureDrag handles all buttons unless filtered.
+    // Let's check the button.
 
-        app->is_moving_selection = TRUE;
-        app->is_dragging = FALSE;
-        app->sel_orig_x1 = app->sel_x1;
-        app->sel_orig_y1 = app->sel_y1;
-        app->sel_orig_x2 = app->sel_x2;
-        app->sel_orig_y2 = app->sel_y2;
-    } else {
-        app->is_moving_selection = FALSE;
-        app->is_dragging = TRUE;
-        app->selection_active = FALSE; // Clear old
+    guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+
+    if (button == GDK_BUTTON_SECONDARY) { // Right Click
+        app->is_adjusting_contrast = TRUE;
+        app->contrast_start_x = x;
+        app->contrast_start_y = y;
+
+        // Disable auto scale first
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_min_auto)) ||
+            gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_max_auto))) {
+
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_min_auto), FALSE);
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_max_auto), FALSE);
+        }
+
+        // Capture start state
+        app->contrast_start_min = app->min_val;
+        app->contrast_start_max = app->max_val;
+
+        return;
     }
 
-    app->start_x = x;
-    app->start_y = y;
-    app->curr_x = x;
-    app->curr_y = y;
+    if (button == GDK_BUTTON_PRIMARY) { // Left Click
+        int ix, iy;
+        widget_to_image_coords(app, x, y, &ix, &iy);
 
-    app->force_redraw = TRUE;
-    gtk_widget_queue_draw(app->selection_area);
+        // Check if clicking inside existing selection
+        if (app->selection_active &&
+            ix >= app->sel_x1 && ix <= app->sel_x2 &&
+            iy >= app->sel_y1 && iy <= app->sel_y2) {
+
+            app->is_moving_selection = TRUE;
+            app->is_dragging = FALSE;
+            app->sel_orig_x1 = app->sel_x1;
+            app->sel_orig_y1 = app->sel_y1;
+            app->sel_orig_x2 = app->sel_x2;
+            app->sel_orig_y2 = app->sel_y2;
+        } else {
+            app->is_moving_selection = FALSE;
+            app->is_dragging = TRUE;
+            app->selection_active = FALSE; // Clear old
+            gtk_widget_set_visible(app->box_stats, FALSE); // Hide stats on new drag
+        }
+
+        app->start_x = x;
+        app->start_y = y;
+        app->curr_x = x;
+        app->curr_y = y;
+
+        app->force_redraw = TRUE;
+        gtk_widget_queue_draw(app->selection_area);
+    }
 }
 
 static void
@@ -527,6 +567,49 @@ drag_update (GtkGestureDrag *gesture,
              gpointer        user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
+
+    if (app->is_adjusting_contrast) {
+        // DS9 Behavior:
+        // Horizontal: Bias (Center)
+        // Vertical: Contrast (Width)
+
+        int width = gtk_widget_get_width(app->selection_area);
+        int height = gtk_widget_get_height(app->selection_area);
+        if (width <= 0) width = 1;
+        if (height <= 0) height = 1;
+
+        double start_center = (app->contrast_start_max + app->contrast_start_min) / 2.0;
+        double start_width = (app->contrast_start_max - app->contrast_start_min);
+        if (start_width == 0) start_width = 1.0;
+
+        // Scale factors logic (approximation of DS9 feel)
+        double range = start_width;
+
+        // Center shift: proportional to width movement
+        double shift = (offset_x / (double)width) * range;
+        double new_center = start_center + shift;
+
+        // Width scale: exponential? Or linear?
+        // DS9 is often exponential for contrast.
+        // Moving UP (negative y) decreases contrast (increases width)?
+        // Or increases contrast (decreases width)?
+        // Usually dragging UP increases value, dragging RIGHT increases value.
+        // Let's assume dragging UP increases contrast (makes width smaller), DOWN makes width larger (lower contrast).
+        // Let's use exp factor.
+        double scale_factor = exp( -offset_y / (double)height * 4.0 );
+        double new_width = start_width / scale_factor;
+
+        // Update Min/Max
+        double new_min = new_center - new_width / 2.0;
+        double new_max = new_center + new_width / 2.0;
+
+        // Apply to controls
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_min), new_min);
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_max), new_max);
+
+        app->force_redraw = TRUE;
+        return;
+    }
 
     if (app->is_moving_selection) {
         double off_x, off_y, scale;
@@ -568,6 +651,11 @@ drag_end (GtkGestureDrag *gesture,
 {
     ViewerApp *app = (ViewerApp *)user_data;
 
+    if (app->is_adjusting_contrast) {
+        app->is_adjusting_contrast = FALSE;
+        return;
+    }
+
     if (app->is_moving_selection) {
         app->is_moving_selection = FALSE;
         app->selection_active = TRUE; // Ensure it stays active
@@ -579,6 +667,7 @@ drag_end (GtkGestureDrag *gesture,
         // If drag is very small, maybe treat as clear?
         if (fabs(offset_x) < 2 && fabs(offset_y) < 2) {
             app->selection_active = FALSE;
+            gtk_widget_set_visible(app->box_stats, FALSE);
         } else {
             app->selection_active = TRUE;
 
@@ -590,11 +679,98 @@ drag_end (GtkGestureDrag *gesture,
             app->sel_x2 = (ix1 < ix2) ? ix2 : ix1;
             app->sel_y1 = (iy1 < iy2) ? iy1 : iy2;
             app->sel_y2 = (iy1 < iy2) ? iy2 : iy1;
+
+            gtk_widget_set_visible(app->box_stats, TRUE);
         }
     }
 
     app->force_redraw = TRUE;
     gtk_widget_queue_draw(app->selection_area);
+}
+
+static int compare_doubles(const void *a, const void *b) {
+    double da = *(const double *)a;
+    double db = *(const double *)b;
+    return (da > db) - (da < db);
+}
+
+static void
+calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8_t datatype) {
+    if (!app->selection_active) return;
+
+    int x1 = app->sel_x1;
+    int x2 = app->sel_x2 + 1; // Inclusive to exclusive
+    int y1 = app->sel_y1;
+    int y2 = app->sel_y2 + 1;
+
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > width) x2 = width;
+    if (y2 > height) y2 = height;
+
+    int roi_w = x2 - x1;
+    int roi_h = y2 - y1;
+
+    if (roi_w <= 0 || roi_h <= 0) return;
+
+    size_t count = roi_w * roi_h;
+    double *values = (double *)malloc(count * sizeof(double));
+    if (!values) return;
+
+    size_t idx = 0;
+    double sum = 0;
+    double min_v = 1e30;
+    double max_v = -1e30;
+
+    for (int y = y1; y < y2; y++) {
+        for (int x = x1; x < x2; x++) {
+            int i = y * width + x;
+            double val = 0;
+            switch (datatype) {
+                case _DATATYPE_FLOAT: val = ((float*)raw_data)[i]; break;
+                case _DATATYPE_DOUBLE: val = ((double*)raw_data)[i]; break;
+                case _DATATYPE_UINT8: val = ((uint8_t*)raw_data)[i]; break;
+                case _DATATYPE_INT16: val = ((int16_t*)raw_data)[i]; break;
+                case _DATATYPE_UINT16: val = ((uint16_t*)raw_data)[i]; break;
+                case _DATATYPE_INT32: val = ((int32_t*)raw_data)[i]; break;
+                case _DATATYPE_UINT32: val = ((uint32_t*)raw_data)[i]; break;
+                default: val = 0; break;
+            }
+            values[idx++] = val;
+            sum += val;
+            if (val < min_v) min_v = val;
+            if (val > max_v) max_v = val;
+        }
+    }
+
+    double mean = sum / count;
+
+    qsort(values, count, sizeof(double), compare_doubles);
+
+    double median = values[count / 2];
+    double p01 = values[(size_t)(count * 0.1)];
+    double p09 = values[(size_t)(count * 0.9)];
+
+    free(values);
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Min: %.4g", min_v);
+    gtk_label_set_text(GTK_LABEL(app->lbl_stat_min), buf);
+
+    snprintf(buf, sizeof(buf), "Max: %.4g", max_v);
+    gtk_label_set_text(GTK_LABEL(app->lbl_stat_max), buf);
+
+    snprintf(buf, sizeof(buf), "Mean: %.4g", mean);
+    gtk_label_set_text(GTK_LABEL(app->lbl_stat_mean), buf);
+
+    snprintf(buf, sizeof(buf), "Median: %.4g", median);
+    gtk_label_set_text(GTK_LABEL(app->lbl_stat_median), buf);
+
+    snprintf(buf, sizeof(buf), "P 0.1: %.4g", p01);
+    gtk_label_set_text(GTK_LABEL(app->lbl_stat_p01), buf);
+
+    snprintf(buf, sizeof(buf), "P 0.9: %.4g", p09);
+    gtk_label_set_text(GTK_LABEL(app->lbl_stat_p09), buf);
 }
 
 static void
@@ -622,6 +798,11 @@ draw_image (ViewerApp *app)
     int width = app->image->md->size[0];
     int height = app->image->md->size[1];
     uint8_t datatype = app->image->md->datatype;
+
+    // Calculate Stats if selection active
+    if (app->selection_active) {
+        calculate_roi_stats(app, raw_data, width, height, datatype);
+    }
 
     int stride = width * 4;
     guchar *pixels = g_malloc (stride * height);
@@ -651,20 +832,15 @@ draw_image (ViewerApp *app)
             for (int x = x_start; x < x_end; x++) {
                 int i = y * width + x;
                 double val = 0;
-                if (datatype == _DATATYPE_FLOAT) {
-                    val = ((float*)raw_data)[i];
-                } else if (datatype == _DATATYPE_DOUBLE) {
-                    val = ((double*)raw_data)[i];
-                } else if (datatype == _DATATYPE_UINT8) {
-                    val = ((uint8_t*)raw_data)[i];
-                } else if (datatype == _DATATYPE_INT16) {
-                     val = ((int16_t*)raw_data)[i];
-                } else if (datatype == _DATATYPE_UINT16) {
-                     val = ((uint16_t*)raw_data)[i];
-                } else if (datatype == _DATATYPE_INT32) {
-                     val = ((int32_t*)raw_data)[i];
-                } else if (datatype == _DATATYPE_UINT32) {
-                     val = ((uint32_t*)raw_data)[i];
+                switch (datatype) {
+                    case _DATATYPE_FLOAT: val = ((float*)raw_data)[i]; break;
+                    case _DATATYPE_DOUBLE: val = ((double*)raw_data)[i]; break;
+                    case _DATATYPE_UINT8: val = ((uint8_t*)raw_data)[i]; break;
+                    case _DATATYPE_INT16: val = ((int16_t*)raw_data)[i]; break;
+                    case _DATATYPE_UINT16: val = ((uint16_t*)raw_data)[i]; break;
+                    case _DATATYPE_INT32: val = ((int32_t*)raw_data)[i]; break;
+                    case _DATATYPE_UINT32: val = ((uint32_t*)raw_data)[i]; break;
+                    default: val = 0; break;
                 }
 
                 if (val < min_val) min_val = val;
@@ -672,7 +848,6 @@ draw_image (ViewerApp *app)
             }
         }
 
-        // Handle case where selection might be empty or invalid values found
         if (min_val > max_val) {
             min_val = 0;
             max_val = 1;
@@ -792,6 +967,8 @@ activate (GtkApplication *app,
     GtkWidget *btn_reset;
     GtkGesture *drag_controller;
     GtkEventController *scroll_controller;
+    GtkWidget *frame_stats;
+    GtkWidget *vbox_stats;
 
     window = gtk_application_window_new (app);
     gtk_window_set_title (GTK_WINDOW (window), "ImageStreamIO Viewer");
@@ -866,6 +1043,42 @@ activate (GtkApplication *app,
     g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), btn_reset);
 
+    // Stats Box
+    frame_stats = gtk_frame_new("ROI Stats");
+    viewer->box_stats = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_margin_start(viewer->box_stats, 5);
+    gtk_widget_set_margin_end(viewer->box_stats, 5);
+    gtk_widget_set_margin_top(viewer->box_stats, 5);
+    gtk_widget_set_margin_bottom(viewer->box_stats, 5);
+    gtk_frame_set_child(GTK_FRAME(frame_stats), viewer->box_stats);
+    gtk_box_append(GTK_BOX(vbox_controls), frame_stats);
+
+    viewer->lbl_stat_min = gtk_label_new("Min: -");
+    gtk_widget_set_halign(viewer->lbl_stat_min, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_min);
+
+    viewer->lbl_stat_max = gtk_label_new("Max: -");
+    gtk_widget_set_halign(viewer->lbl_stat_max, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_max);
+
+    viewer->lbl_stat_mean = gtk_label_new("Mean: -");
+    gtk_widget_set_halign(viewer->lbl_stat_mean, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_mean);
+
+    viewer->lbl_stat_median = gtk_label_new("Median: -");
+    gtk_widget_set_halign(viewer->lbl_stat_median, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_median);
+
+    viewer->lbl_stat_p01 = gtk_label_new("P 0.1: -");
+    gtk_widget_set_halign(viewer->lbl_stat_p01, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_p01);
+
+    viewer->lbl_stat_p09 = gtk_label_new("P 0.9: -");
+    gtk_widget_set_halign(viewer->lbl_stat_p09, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_p09);
+
+    gtk_widget_set_visible(viewer->box_stats, FALSE);
+
 
     // Image Display Area with Overlay
     scrolled_window = gtk_scrolled_window_new ();
@@ -897,6 +1110,7 @@ activate (GtkApplication *app,
 
     // Gestures for dragging selection
     drag_controller = gtk_gesture_drag_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag_controller), 0); // Accept all buttons
     g_signal_connect(drag_controller, "drag-begin", G_CALLBACK(drag_begin), viewer);
     g_signal_connect(drag_controller, "drag-update", G_CALLBACK(drag_update), viewer);
     g_signal_connect(drag_controller, "drag-end", G_CALLBACK(drag_end), viewer);

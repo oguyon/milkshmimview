@@ -37,11 +37,19 @@ typedef struct {
     int sel_x1, sel_y1, sel_x2, sel_y2;
     int sel_orig_x1, sel_orig_y1, sel_orig_x2, sel_orig_y2;
 
+    // Zoom state
+    gboolean fit_window;
+    double zoom_factor; // 1.0 = 100%
+
     // UI Widgets
     GtkWidget *spin_min;
     GtkWidget *check_min_auto;
     GtkWidget *spin_max;
     GtkWidget *check_max_auto;
+
+    GtkWidget *btn_fit_window;
+    GtkWidget *dropdown_zoom;
+    GtkWidget *lbl_zoom;
 } ViewerApp;
 
 // Command line option variables
@@ -79,6 +87,10 @@ static GOptionEntry entries[] =
   { "max", 'M', G_OPTION_FLAG_NONE, G_OPTION_ARG_CALLBACK, parse_max_cb, "Maximum value for scaling", "VAL" },
   { NULL }
 };
+
+// Forward decl
+static void update_zoom_layout(ViewerApp *app);
+static void get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale);
 
 // UI Callbacks
 static void
@@ -122,10 +134,6 @@ on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
 
-    // Toggle logic:
-    // If both are Auto (active), set both to Manual (inactive).
-    // Otherwise (one or both are Manual), set both to Auto (active).
-
     gboolean min_auto = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_min_auto));
     gboolean max_auto = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_max_auto));
 
@@ -149,6 +157,188 @@ on_btn_reset_selection_clicked (GtkButton *btn, gpointer user_data)
     app->selection_active = FALSE;
     app->force_redraw = TRUE;
     gtk_widget_queue_draw(app->selection_area);
+}
+
+static void
+on_fit_window_toggled (GtkCheckButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->fit_window = gtk_check_button_get_active(btn);
+
+    if (!app->fit_window) {
+        // Switching to fixed zoom. Initialize zoom_factor to current actual scale
+        double off_x, off_y, scale;
+        get_image_screen_geometry(app, &off_x, &off_y, &scale);
+        if (scale > 0) app->zoom_factor = scale;
+        else app->zoom_factor = 1.0;
+    }
+
+    update_zoom_layout(app);
+}
+
+static void
+on_dropdown_zoom_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    guint selected = gtk_drop_down_get_selected(dropdown);
+
+    // Zoom levels: 1/8, 1/4, 1/2, 1, 2, 4, 8
+    double zooms[] = {0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0};
+    if (selected < 7) {
+        app->zoom_factor = zooms[selected];
+
+        // Disable Fit Window if it was on
+        if (app->fit_window) {
+            // This will trigger on_fit_window_toggled loop, so block signal?
+            // Or just update state.
+            // Better to update toggle state which triggers the logic.
+            g_signal_handlers_block_by_func(app->btn_fit_window, on_fit_window_toggled, app);
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(app->btn_fit_window), FALSE);
+            app->fit_window = FALSE;
+            g_signal_handlers_unblock_by_func(app->btn_fit_window, on_fit_window_toggled, app);
+        }
+
+        update_zoom_layout(app);
+    }
+}
+
+static gboolean
+on_scroll (GtkEventControllerScroll *controller,
+           double                    dx,
+           double                    dy,
+           gpointer                  user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+
+    // Check modifiers for Ctrl key (if desired, or just always zoom?)
+    // Prompt said "Have mouse wheel roll change zoom ratio".
+    // Standard behavior for image viewers often is Scroll to Zoom, Drag to Pan.
+    // Since we use Drag for ROI, we rely on Scrollbars for Panning.
+    // So Scroll for Zoom is acceptable.
+
+    double zoom_step = 1.1;
+    if (dy > 0) {
+        app->zoom_factor /= zoom_step;
+    } else if (dy < 0) {
+        app->zoom_factor *= zoom_step;
+    }
+
+    // Disable Fit Window
+    if (app->fit_window) {
+        // Initialize zoom factor first
+        double off_x, off_y, scale;
+        get_image_screen_geometry(app, &off_x, &off_y, &scale);
+        app->zoom_factor = scale;
+        // Apply the scroll step
+        if (dy > 0) app->zoom_factor /= zoom_step;
+        else if (dy < 0) app->zoom_factor *= zoom_step;
+
+        g_signal_handlers_block_by_func(app->btn_fit_window, on_fit_window_toggled, app);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(app->btn_fit_window), FALSE);
+        app->fit_window = FALSE;
+        g_signal_handlers_unblock_by_func(app->btn_fit_window, on_fit_window_toggled, app);
+    }
+
+    update_zoom_layout(app);
+    return TRUE; // Handled
+}
+
+// Helpers for coordinate conversion
+static void
+get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale) {
+    if (!app->image) {
+        *offset_x = 0; *offset_y = 0; *scale = 1.0;
+        return;
+    }
+
+    // In Fixed Zoom mode, the widget size IS the image display size (mostly)
+    // In Fit Window mode, the widget size IS the viewport size
+
+    int widget_w = gtk_widget_get_width(app->picture);
+    int widget_h = gtk_widget_get_height(app->picture);
+
+    if (widget_w <= 0 || widget_h <= 0) {
+        *offset_x = 0; *offset_y = 0; *scale = 1.0;
+        return;
+    }
+
+    double img_w = (double)app->image->md->size[0];
+    double img_h = (double)app->image->md->size[1];
+
+    if (img_w <= 0 || img_h <= 0) {
+        *offset_x = 0; *offset_y = 0; *scale = 1.0;
+        return;
+    }
+
+    if (app->fit_window) {
+        double scale_x = (double)widget_w / img_w;
+        double scale_y = (double)widget_h / img_h;
+        *scale = (scale_x < scale_y) ? scale_x : scale_y;
+    } else {
+        // In Fixed Zoom, we forced the widget size to match the zoom.
+        // However, GtkPicture might center it if the widget allocation is larger (e.g. strict constraints).
+        // But generally, the scaling is driven by our sizing.
+        // If we use GTK_CONTENT_FIT_FILL, the image fills the widget.
+        // So scale is widget_w / img_w.
+
+        // Wait, if we zoomed OUT (0.1x), the widget is small.
+        // If we zoom IN (10x), the widget is large.
+        // We set the size request.
+        *scale = (double)widget_w / img_w;
+    }
+
+    double display_w = img_w * (*scale);
+    double display_h = img_h * (*scale);
+
+    *offset_x = (widget_w - display_w) / 2.0;
+    *offset_y = (widget_h - display_h) / 2.0;
+}
+
+static void
+update_zoom_layout(ViewerApp *app) {
+    if (!app->image) return;
+
+    double img_w = (double)app->image->md->size[0];
+    double img_h = (double)app->image->md->size[1];
+
+    char buf[64];
+
+    if (app->fit_window) {
+        gtk_picture_set_content_fit(GTK_PICTURE(app->picture), GTK_CONTENT_FIT_CONTAIN);
+        gtk_widget_set_size_request(app->picture, -1, -1);
+
+        // Update label with current calculated scale
+        double off_x, off_y, scale;
+        get_image_screen_geometry(app, &off_x, &off_y, &scale);
+        snprintf(buf, sizeof(buf), "Zoom: %.1f%%", scale * 100.0);
+        gtk_label_set_text(GTK_LABEL(app->lbl_zoom), buf);
+
+        // Ensure overlay redraws selection in new place
+        gtk_widget_queue_draw(app->selection_area);
+    } else {
+        // Fixed zoom
+        int req_w = (int)(img_w * app->zoom_factor);
+        int req_h = (int)(img_h * app->zoom_factor);
+
+        // Use FILL to force image to occupy the requested size (scaling handled by GTK)
+        gtk_picture_set_content_fit(GTK_PICTURE(app->picture), GTK_CONTENT_FIT_FILL);
+        gtk_widget_set_size_request(app->picture, req_w, req_h);
+
+        snprintf(buf, sizeof(buf), "Zoom: %.1f%%", app->zoom_factor * 100.0);
+        gtk_label_set_text(GTK_LABEL(app->lbl_zoom), buf);
+
+        gtk_widget_queue_draw(app->selection_area);
+    }
+}
+
+// Callback for picture resize (to update zoom label in Fit Window mode)
+static void
+on_picture_resize (GtkWidget *widget, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    if (app->fit_window) {
+        update_zoom_layout(app);
+    }
 }
 
 // Drawing function for colorbar
@@ -199,42 +389,6 @@ draw_colorbar_func (GtkDrawingArea *area,
     cairo_text_extents(cr, buf, &extents);
     cairo_move_to(cr, (width - extents.width)/2, height - margin_bottom + extents.height + 5);
     cairo_show_text(cr, buf);
-}
-
-// Helpers for coordinate conversion
-static void
-get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale) {
-    if (!app->image) {
-        *offset_x = 0; *offset_y = 0; *scale = 1.0;
-        return;
-    }
-
-    int widget_w = gtk_widget_get_width(app->picture);
-    int widget_h = gtk_widget_get_height(app->picture);
-
-    if (widget_w <= 0 || widget_h <= 0) {
-        *offset_x = 0; *offset_y = 0; *scale = 1.0;
-        return;
-    }
-
-    double img_w = (double)app->image->md->size[0];
-    double img_h = (double)app->image->md->size[1];
-
-    if (img_w <= 0 || img_h <= 0) {
-        *offset_x = 0; *offset_y = 0; *scale = 1.0;
-        return;
-    }
-
-    double scale_x = (double)widget_w / img_w;
-    double scale_y = (double)widget_h / img_h;
-
-    *scale = (scale_x < scale_y) ? scale_x : scale_y;
-
-    double display_w = img_w * (*scale);
-    double display_h = img_h * (*scale);
-
-    *offset_x = (widget_w - display_w) / 2.0;
-    *offset_y = (widget_h - display_h) / 2.0;
 }
 
 static void
@@ -556,6 +710,11 @@ draw_image (ViewerApp *app)
 
     gtk_picture_set_paintable (GTK_PICTURE (app->picture), GDK_PAINTABLE (texture));
     g_object_unref (texture);
+
+    // Initial zoom layout on first load if fit_window
+    if (app->fit_window && gtk_widget_get_width(app->picture) > 0) {
+        update_zoom_layout(app);
+    }
 }
 
 static gboolean
@@ -571,6 +730,9 @@ update_display (gpointer user_data)
              return G_SOURCE_CONTINUE;
         }
         printf("Connected to stream: %s\n", app->image_name);
+        // Reset zoom on load
+        app->fit_window = TRUE;
+        if (app->btn_fit_window) gtk_check_button_set_active(GTK_CHECK_BUTTON(app->btn_fit_window), TRUE);
     }
 
     static uint64_t last_cnt0 = 0;
@@ -602,6 +764,7 @@ activate (GtkApplication *app,
     GtkWidget *btn_autoscale;
     GtkWidget *btn_reset;
     GtkGesture *drag_controller;
+    GtkEventController *scroll_controller;
 
     window = gtk_application_window_new (app);
     gtk_window_set_title (GTK_WINDOW (window), "ImageStreamIO Viewer");
@@ -618,6 +781,25 @@ activate (GtkApplication *app,
     gtk_widget_set_margin_top (vbox_controls, 10);
     gtk_widget_set_margin_bottom (vbox_controls, 10);
     gtk_box_append (GTK_BOX (hbox), vbox_controls);
+
+    // Zoom Controls
+    label = gtk_label_new ("Zoom");
+    gtk_widget_set_halign (label, GTK_ALIGN_START);
+    gtk_box_append (GTK_BOX (vbox_controls), label);
+
+    viewer->btn_fit_window = gtk_check_button_new_with_label ("Fit to Window");
+    gtk_check_button_set_active (GTK_CHECK_BUTTON (viewer->btn_fit_window), TRUE);
+    g_signal_connect (viewer->btn_fit_window, "toggled", G_CALLBACK (on_fit_window_toggled), viewer);
+    gtk_box_append (GTK_BOX (vbox_controls), viewer->btn_fit_window);
+
+    const char *zoom_levels[] = {"1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x", NULL};
+    viewer->dropdown_zoom = gtk_drop_down_new_from_strings (zoom_levels);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_zoom), 3); // 1x
+    g_signal_connect (viewer->dropdown_zoom, "notify::selected", G_CALLBACK (on_dropdown_zoom_changed), viewer);
+    gtk_box_append (GTK_BOX (vbox_controls), viewer->dropdown_zoom);
+
+    viewer->lbl_zoom = gtk_label_new ("Zoom: 100%");
+    gtk_box_append (GTK_BOX (vbox_controls), viewer->lbl_zoom);
 
     // Min Controls
     label = gtk_label_new ("Min Value");
@@ -664,11 +846,18 @@ activate (GtkApplication *app,
     gtk_widget_set_hexpand (scrolled_window, TRUE);
     gtk_box_append (GTK_BOX (hbox), scrolled_window);
 
+    // Add scroll controller for zoom
+    scroll_controller = gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
+    g_signal_connect (scroll_controller, "scroll", G_CALLBACK (on_scroll), viewer);
+    gtk_widget_add_controller (scrolled_window, scroll_controller);
+
     overlay = gtk_overlay_new();
     gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled_window), overlay);
 
     viewer->picture = gtk_picture_new ();
-    gtk_picture_set_content_fit (GTK_PICTURE (viewer->picture), GTK_CONTENT_FIT_CONTAIN);
+    // Use resize signal to update zoom label when Fit Window is on
+    g_signal_connect(viewer->picture, "resize", G_CALLBACK(on_picture_resize), viewer);
+
     // Add Picture as child
     gtk_overlay_set_child(GTK_OVERLAY(overlay), viewer->picture);
 
@@ -702,6 +891,9 @@ activate (GtkApplication *app,
 
     if (viewer->fixed_min) gtk_spin_button_set_value (GTK_SPIN_BUTTON (viewer->spin_min), viewer->min_val);
     if (viewer->fixed_max) gtk_spin_button_set_value (GTK_SPIN_BUTTON (viewer->spin_max), viewer->max_val);
+
+    viewer->fit_window = TRUE;
+    viewer->zoom_factor = 1.0;
 
     viewer->timeout_id = g_timeout_add (30, update_display, viewer);
 

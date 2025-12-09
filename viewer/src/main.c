@@ -850,13 +850,20 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
         }
 
         app->hist_max_count = 0;
-        double range = max_v - min_v;
+
+        // Use Global Display Range for Histogram
+        double disp_min = app->current_min;
+        double disp_max = app->current_max;
+        double range = disp_max - disp_min;
+
         if (range <= 0) range = 1.0;
 
         for (size_t i = 0; i < count; ++i) {
-            int bin = (int)((values[i] - min_v) / range * (app->hist_bins - 1));
+            int bin = (int)((values[i] - disp_min) / range * (app->hist_bins - 1));
+            // Clamp to histogram bounds
             if (bin < 0) bin = 0;
             if (bin >= app->hist_bins) bin = app->hist_bins - 1;
+
             app->hist_data[bin]++;
             if (app->hist_data[bin] > app->hist_max_count) app->hist_max_count = app->hist_data[bin];
         }
@@ -920,11 +927,6 @@ draw_image (ViewerApp *app)
     uint8_t datatype = app->image->md->datatype;
     app->img_width = width;
     app->img_height = height;
-
-    // Calculate Stats if selection active
-    if (app->selection_active) {
-        calculate_roi_stats(app, raw_data, width, height, datatype);
-    }
 
     int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, width);
     size_t required_size = stride * height;
@@ -1000,6 +1002,11 @@ draw_image (ViewerApp *app)
     }
     if (!app->fixed_max && app->spin_max) {
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_max), max_val);
+    }
+
+    // Calculate Stats if selection active - NOW using updated current_min/max
+    if (app->selection_active) {
+        calculate_roi_stats(app, raw_data, width, height, datatype);
     }
 
     // Populate display buffer

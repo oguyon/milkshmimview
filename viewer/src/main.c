@@ -278,9 +278,7 @@ draw_selection_func (GtkDrawingArea *area,
         y2 += scale;
     }
 
-    cairo_set_source_rgba(cr, 1, 0, 0, 0.3); // Red transparent fill
-    cairo_rectangle(cr, x1, y1, x2 - x1, y2 - y1);
-    cairo_fill(cr);
+    // Removed transparent fill
 
     cairo_set_source_rgb(cr, 1, 0, 0); // Red outline
     cairo_set_line_width(cr, 2);

@@ -54,7 +54,15 @@ typedef struct {
     gboolean fit_window;
     double zoom_factor; // 1.0 = 100%
 
+    // Stats & Histogram
+    guint32 *hist_data;
+    int hist_bins;
+    guint32 hist_max_count;
+
     // UI Widgets
+    GtkWidget *lbl_counter;
+    GtkWidget *dropdown_fps;
+
     GtkWidget *spin_min;
     GtkWidget *check_min_auto;
     GtkWidget *spin_max;
@@ -72,6 +80,9 @@ typedef struct {
     GtkWidget *lbl_stat_median;
     GtkWidget *lbl_stat_p01;
     GtkWidget *lbl_stat_p09;
+
+    GtkWidget *check_histogram;
+    GtkWidget *histogram_area;
 } ViewerApp;
 
 // Command line option variables
@@ -114,8 +125,36 @@ static GOptionEntry entries[] =
 static void update_zoom_layout(ViewerApp *app);
 static void get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale);
 static void widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy);
+static gboolean update_display (gpointer user_data);
 
 // UI Callbacks
+static void
+on_fps_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    guint selected = gtk_drop_down_get_selected(dropdown);
+
+    guint interval = 33; // Default ~30fps
+    if (selected == 0) interval = 100; // 10 Hz
+    else if (selected == 1) interval = 40; // 25 Hz
+    else if (selected == 2) interval = 20; // 50 Hz
+    else if (selected == 3) interval = 10; // 100 Hz
+
+    if (app->timeout_id > 0) {
+        g_source_remove(app->timeout_id);
+    }
+    app->timeout_id = g_timeout_add(interval, update_display, app);
+}
+
+static void
+on_histogram_toggled (GtkCheckButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gboolean active = gtk_check_button_get_active(btn);
+    gtk_widget_set_visible(app->histogram_area, active && app->selection_active);
+    app->force_redraw = TRUE;
+}
+
 static void
 on_auto_min_toggled (GtkCheckButton *btn, gpointer user_data)
 {
@@ -431,6 +470,31 @@ draw_colorbar_func (GtkDrawingArea *area,
     cairo_show_text(cr, buf);
 }
 
+// Drawing function for Histogram
+static void
+draw_histogram_func (GtkDrawingArea *area,
+                     cairo_t        *cr,
+                     int             width,
+                     int             height,
+                     gpointer        user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    if (!app->hist_data || app->hist_max_count == 0) return;
+
+    cairo_set_source_rgb(cr, 0.2, 0.2, 0.2); // Dark gray background
+    cairo_paint(cr);
+
+    cairo_set_source_rgb(cr, 0.8, 0.8, 0.8); // Light gray bars
+
+    double bin_width = (double)width / app->hist_bins;
+
+    for (int i = 0; i < app->hist_bins; ++i) {
+        double h = ((double)app->hist_data[i] / app->hist_max_count) * height;
+        cairo_rectangle(cr, i * bin_width, height - h, bin_width, h);
+        cairo_fill(cr);
+    }
+}
+
 // Drawing function for Image Area (Nearest Neighbor)
 static void
 draw_image_area_func (GtkDrawingArea *area,
@@ -455,16 +519,6 @@ draw_image_area_func (GtkDrawingArea *area,
     double off_x, off_y, scale;
     get_image_screen_geometry(app, &off_x, &off_y, &scale);
 
-    // Geometry logic for DrawingArea vs Picture:
-    // With GtkPicture, the widget itself was sized/positioned.
-    // With GtkDrawingArea in Fill mode, the widget fills the allocated space.
-    // get_image_screen_geometry calculates offset within the widget.
-    // We must undo the coordinate translation we added for Overlay if we are drawing IN the widget.
-    // But wait, `get_image_screen_geometry` does `gtk_widget_compute_point` to Overlay.
-    // The `draw_func` coordinate system is local to `image_area`.
-    // So we should NOT include the translation to overlay.
-    // We need internal offset.
-
     double int_off_x = 0;
     double int_off_y = 0;
 
@@ -480,9 +534,6 @@ draw_image_area_func (GtkDrawingArea *area,
         int_off_y = (height - display_h) / 2.0;
     } else {
         scale = app->zoom_factor;
-        // In Fixed mode, if widget is larger than image, center it.
-        // If image is larger, widget size request handles it, so offset is 0.
-        // But DrawingArea always fills allocation.
         double display_w = app->img_width * scale;
         double display_h = app->img_height * scale;
 
@@ -722,6 +773,9 @@ drag_end (GtkGestureDrag *gesture,
             app->sel_y2 = (iy1 < iy2) ? iy2 : iy1;
 
             gtk_widget_set_visible(app->box_stats, TRUE);
+            if (gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_histogram))) {
+                gtk_widget_set_visible(app->histogram_area, TRUE);
+            }
         }
     }
 
@@ -763,6 +817,7 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
     double min_v = 1e30;
     double max_v = -1e30;
 
+    // First pass for min/max/sum/values
     for (int y = y1; y < y2; y++) {
         for (int x = x1; x < x2; x++) {
             int i = y * width + x;
@@ -782,6 +837,30 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
             if (val < min_v) min_v = val;
             if (val > max_v) max_v = val;
         }
+    }
+
+    // Calculate Histogram if enabled
+    gboolean show_hist = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_histogram));
+    if (show_hist) {
+        if (!app->hist_data) {
+            app->hist_bins = 256;
+            app->hist_data = (guint32*)calloc(app->hist_bins, sizeof(guint32));
+        } else {
+            memset(app->hist_data, 0, app->hist_bins * sizeof(guint32));
+        }
+
+        app->hist_max_count = 0;
+        double range = max_v - min_v;
+        if (range <= 0) range = 1.0;
+
+        for (size_t i = 0; i < count; ++i) {
+            int bin = (int)((values[i] - min_v) / range * (app->hist_bins - 1));
+            if (bin < 0) bin = 0;
+            if (bin >= app->hist_bins) bin = app->hist_bins - 1;
+            app->hist_data[bin]++;
+            if (app->hist_data[bin] > app->hist_max_count) app->hist_max_count = app->hist_data[bin];
+        }
+        gtk_widget_queue_draw(app->histogram_area);
     }
 
     double mean = sum / count;
@@ -842,6 +921,7 @@ draw_image (ViewerApp *app)
     app->img_width = width;
     app->img_height = height;
 
+    // Calculate Stats if selection active
     if (app->selection_active) {
         calculate_roi_stats(app, raw_data, width, height, datatype);
     }
@@ -949,17 +1029,11 @@ draw_image (ViewerApp *app)
             if (norm > 1) norm = 1;
             uint8_t pixel_val = (uint8_t)(norm * 255.0);
 
-            // CAIRO_FORMAT_RGB24 is 32-bit: XRGB (little endian -> B G R X)
-            // We want grayscale. B=G=R=pixel_val.
             row[x] = (255 << 24) | (pixel_val << 16) | (pixel_val << 8) | pixel_val;
         }
     }
 
     gtk_widget_queue_draw(app->image_area);
-
-    if (app->fit_window && gtk_widget_get_width(app->image_area) > 0) {
-        // Just update layout params if needed, mostly handled by draw func
-    }
 }
 
 static gboolean
@@ -978,6 +1052,11 @@ update_display (gpointer user_data)
         app->fit_window = TRUE;
         if (app->btn_fit_window) gtk_check_button_set_active(GTK_CHECK_BUTTON(app->btn_fit_window), TRUE);
     }
+
+    // Update counter label
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Counter: %lu", app->image->md->cnt0);
+    gtk_label_set_text(GTK_LABEL(app->lbl_counter), buf);
 
     static uint64_t last_cnt0 = 0;
 
@@ -1002,7 +1081,7 @@ activate (GtkApplication *app,
     GtkWidget *window;
     GtkWidget *hbox;
     GtkWidget *vbox_controls;
-    GtkWidget *vbox_right;
+    GtkWidget *hbox_right;
     GtkWidget *scrolled_window;
     GtkWidget *overlay;
     GtkWidget *label;
@@ -1028,6 +1107,21 @@ activate (GtkApplication *app,
     gtk_widget_set_margin_top (vbox_controls, 10);
     gtk_widget_set_margin_bottom (vbox_controls, 10);
     gtk_box_append (GTK_BOX (hbox), vbox_controls);
+
+    // Counter
+    viewer->lbl_counter = gtk_label_new("Counter: 0");
+    gtk_widget_set_halign(viewer->lbl_counter, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(vbox_controls), viewer->lbl_counter);
+
+    // FPS Control
+    label = gtk_label_new("FPS");
+    gtk_widget_set_halign(label, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(vbox_controls), label);
+    const char *fps_opts[] = {"10 Hz", "25 Hz", "50 Hz", "100 Hz", NULL};
+    viewer->dropdown_fps = gtk_drop_down_new_from_strings(fps_opts);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_fps), 1); // 25Hz default
+    g_signal_connect(viewer->dropdown_fps, "notify::selected", G_CALLBACK(on_fps_changed), viewer);
+    gtk_box_append(GTK_BOX(vbox_controls), viewer->dropdown_fps);
 
     // Zoom Controls
     label = gtk_label_new ("Zoom");
@@ -1089,6 +1183,10 @@ activate (GtkApplication *app,
     g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), btn_reset);
 
+    viewer->check_histogram = gtk_check_button_new_with_label("Show Histogram");
+    g_signal_connect(viewer->check_histogram, "toggled", G_CALLBACK(on_histogram_toggled), viewer);
+    gtk_box_append(GTK_BOX(vbox_controls), viewer->check_histogram);
+
 
     // Image Display Area with Overlay (Center)
     scrolled_window = gtk_scrolled_window_new ();
@@ -1124,13 +1222,20 @@ activate (GtkApplication *app,
     gtk_widget_add_controller(viewer->selection_area, GTK_EVENT_CONTROLLER(drag_controller));
 
 
-    // Right Sidebar (Stats + Colorbar)
-    vbox_right = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    gtk_widget_set_margin_start(vbox_right, 10);
-    gtk_widget_set_margin_end(vbox_right, 10);
-    gtk_widget_set_margin_top(vbox_right, 10);
-    gtk_widget_set_margin_bottom(vbox_right, 10);
-    gtk_box_append(GTK_BOX(hbox), vbox_right);
+    // Right Sidebar (Colorbar + Stats)
+    hbox_right = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_margin_start(hbox_right, 10);
+    gtk_widget_set_margin_end(hbox_right, 10);
+    gtk_widget_set_margin_top(hbox_right, 10);
+    gtk_widget_set_margin_bottom(hbox_right, 10);
+    gtk_box_append(GTK_BOX(hbox), hbox_right);
+
+    // Colorbar
+    viewer->colorbar = gtk_drawing_area_new ();
+    gtk_widget_set_size_request (viewer->colorbar, 60, -1);
+    gtk_widget_set_vexpand(viewer->colorbar, TRUE);
+    gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (viewer->colorbar), draw_colorbar_func, viewer, NULL);
+    gtk_box_append (GTK_BOX (hbox_right), viewer->colorbar);
 
     // Stats Box
     frame_stats = gtk_frame_new("ROI Stats");
@@ -1140,7 +1245,8 @@ activate (GtkApplication *app,
     gtk_widget_set_margin_top(viewer->box_stats, 5);
     gtk_widget_set_margin_bottom(viewer->box_stats, 5);
     gtk_frame_set_child(GTK_FRAME(frame_stats), viewer->box_stats);
-    gtk_box_append(GTK_BOX(vbox_right), frame_stats);
+    // Add stats frame to right of colorbar
+    gtk_box_append(GTK_BOX(hbox_right), frame_stats);
 
     viewer->lbl_stat_min = gtk_label_new("Min: -");
     gtk_widget_set_halign(viewer->lbl_stat_min, GTK_ALIGN_START);
@@ -1166,14 +1272,14 @@ activate (GtkApplication *app,
     gtk_widget_set_halign(viewer->lbl_stat_p09, GTK_ALIGN_START);
     gtk_box_append(GTK_BOX(viewer->box_stats), viewer->lbl_stat_p09);
 
-    gtk_widget_set_visible(viewer->box_stats, FALSE);
+    // Histogram
+    viewer->histogram_area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(viewer->histogram_area, 150, 100);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->histogram_area), draw_histogram_func, viewer, NULL);
+    gtk_widget_set_visible(viewer->histogram_area, FALSE);
+    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->histogram_area);
 
-    // Colorbar
-    viewer->colorbar = gtk_drawing_area_new ();
-    gtk_widget_set_size_request (viewer->colorbar, 60, -1);
-    gtk_widget_set_vexpand(viewer->colorbar, TRUE);
-    gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (viewer->colorbar), draw_colorbar_func, viewer, NULL);
-    gtk_box_append (GTK_BOX (vbox_right), viewer->colorbar);
+    gtk_widget_set_visible(viewer->box_stats, FALSE);
 
 
     // Initialize UI State based on CLI args
@@ -1189,6 +1295,7 @@ activate (GtkApplication *app,
     viewer->fit_window = TRUE;
     viewer->zoom_factor = 1.0;
 
+    // Default 30ms = 33Hz
     viewer->timeout_id = g_timeout_add (30, update_display, viewer);
 
     gtk_window_present (GTK_WINDOW (window));
@@ -1233,6 +1340,7 @@ main (int    argc,
         free(viewer.image);
     }
     if (viewer.display_buffer) free(viewer.display_buffer);
+    if (viewer.hist_data) free(viewer.hist_data);
 
     return status;
 }

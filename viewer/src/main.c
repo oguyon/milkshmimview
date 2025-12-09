@@ -121,8 +121,24 @@ static void
 on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_min_auto), TRUE);
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_max_auto), TRUE);
+
+    // Toggle logic:
+    // If both are Auto (active), set both to Manual (inactive).
+    // Otherwise (one or both are Manual), set both to Auto (active).
+
+    gboolean min_auto = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_min_auto));
+    gboolean max_auto = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_max_auto));
+
+    gboolean new_state;
+    if (min_auto && max_auto) {
+        new_state = FALSE; // Turn OFF auto
+    } else {
+        new_state = TRUE;  // Turn ON auto
+    }
+
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_min_auto), new_state);
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_max_auto), new_state);
+
     app->force_redraw = TRUE;
 }
 

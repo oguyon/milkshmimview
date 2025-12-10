@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <time.h>
 
 // Enums for Dropdowns
 enum {
@@ -133,6 +134,13 @@ typedef struct {
     GtkWidget *box_images;
     GtkWidget *scrolled_roi;
     GtkWidget *roi_image_area;
+
+    // UI Control
+    GtkWidget *vbox_controls;
+    GtkWidget *btn_ctrl_overlay;
+    GtkWidget *lbl_fps_est;
+    struct timespec last_fps_time;
+    uint64_t last_fps_cnt;
 } ViewerApp;
 
 // Command line option variables
@@ -179,6 +187,24 @@ gboolean update_display (gpointer user_data);
 static void on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data);
 
 // Helper Functions for Color & Scale
+
+static const char* get_datatype_string(int type) {
+    switch(type) {
+        case _DATATYPE_UINT8: return "UINT8";
+        case _DATATYPE_INT8: return "INT8";
+        case _DATATYPE_UINT16: return "UINT16";
+        case _DATATYPE_INT16: return "INT16";
+        case _DATATYPE_UINT32: return "UINT32";
+        case _DATATYPE_INT32: return "INT32";
+        case _DATATYPE_UINT64: return "UINT64";
+        case _DATATYPE_INT64: return "INT64";
+        case _DATATYPE_FLOAT: return "FLOAT";
+        case _DATATYPE_DOUBLE: return "DOUBLE";
+        case _DATATYPE_COMPLEX_FLOAT: return "CFLOAT";
+        case _DATATYPE_COMPLEX_DOUBLE: return "CDOUBLE";
+        default: return "UNKNOWN";
+    }
+}
 
 static double apply_scaling(double t, int type) {
     if (t < 0) t = 0;
@@ -273,16 +299,36 @@ static void get_colormap_color(double t, int type, double *r, double *g, double 
 
 // UI Callbacks
 static void
+on_hide_controls_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gtk_widget_set_visible(app->vbox_controls, FALSE);
+    gtk_widget_set_visible(app->btn_ctrl_overlay, TRUE);
+}
+
+static void
+on_show_controls_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gtk_widget_set_visible(app->vbox_controls, TRUE);
+    gtk_widget_set_visible(app->btn_ctrl_overlay, FALSE);
+}
+
+static void
 on_fps_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     guint selected = gtk_drop_down_get_selected(dropdown);
 
     guint interval = 33; // Default ~30fps
-    if (selected == 0) interval = 100; // 10 Hz
-    else if (selected == 1) interval = 40; // 25 Hz
-    else if (selected == 2) interval = 20; // 50 Hz
-    else if (selected == 3) interval = 10; // 100 Hz
+    // 1, 2, 5, 10, 25, 50, 100
+    if (selected == 0) interval = 1000;
+    else if (selected == 1) interval = 500;
+    else if (selected == 2) interval = 200;
+    else if (selected == 3) interval = 100;
+    else if (selected == 4) interval = 40;
+    else if (selected == 5) interval = 20;
+    else if (selected == 6) interval = 10;
 
     if (app->timeout_id > 0) {
         g_source_remove(app->timeout_id);
@@ -396,16 +442,9 @@ on_btn_reset_colorbar_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
 
-    // Reset Colormap windowing
+    // Reset Colormap windowing only
     app->cmap_min = 0.0;
     app->cmap_max = 1.0;
-
-    // Force Auto On (reset absolute limits)
-    on_btn_autoscale_clicked(NULL, app);
-    // Wait, reusing on_btn_autoscale_clicked might toggle off if already on.
-    // Explicitly set to Auto
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_min_auto), TRUE);
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_max_auto), TRUE);
 
     app->force_redraw = TRUE;
 }
@@ -1325,6 +1364,7 @@ draw_image (ViewerApp *app)
     if (!app->display_buffer || app->display_buffer_size < required_size) {
         if (app->display_buffer) free(app->display_buffer);
         app->display_buffer = malloc(required_size);
+        if (!app->display_buffer) return;
         app->display_buffer_size = required_size;
     }
 
@@ -1465,12 +1505,43 @@ update_display (gpointer user_data)
         app->cmap_min = 0.0;
         app->cmap_max = 1.0;
         if (app->btn_fit_window) gtk_check_button_set_active(GTK_CHECK_BUTTON(app->btn_fit_window), TRUE);
+
+        // Init ROI to full frame
+        app->sel_x1 = 0;
+        app->sel_y1 = 0;
+        app->sel_x2 = app->image->md->size[0];
+        app->sel_y2 = app->image->md->size[1];
+        app->selection_active = TRUE;
+
+        // Set Window Title
+        GtkWindow *win = GTK_WINDOW(gtk_widget_get_root(app->image_area));
+        if (win) {
+            char title[256];
+            snprintf(title, sizeof(title), "MilkShmimView: %s [%s %dx%d]",
+                     app->image_name,
+                     get_datatype_string(app->image->md->datatype),
+                     (int)app->image->md->size[0], (int)app->image->md->size[1]);
+            gtk_window_set_title(win, title);
+        }
     }
 
     // Update counter label
     char buf[64];
     snprintf(buf, sizeof(buf), "Counter: %lu", app->image->md->cnt0);
     gtk_label_set_text(GTK_LABEL(app->lbl_counter), buf);
+
+    // FPS Estimation
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double dt = (now.tv_sec - app->last_fps_time.tv_sec) + (now.tv_nsec - app->last_fps_time.tv_nsec) / 1e9;
+    if (dt >= 1.0) {
+        double fps = (double)(app->image->md->cnt0 - app->last_fps_cnt) / dt;
+        if (fps < 0) fps = 0;
+        snprintf(buf, sizeof(buf), "%.1f Hz", fps);
+        gtk_label_set_text(GTK_LABEL(app->lbl_fps_est), buf);
+        app->last_fps_time = now;
+        app->last_fps_cnt = app->image->md->cnt0;
+    }
 
     static uint64_t last_cnt0 = 0;
 
@@ -1514,42 +1585,47 @@ activate (GtkApplication *app,
     gtk_window_set_child (GTK_WINDOW (window), hbox);
 
     // Sidebar Controls (Left)
-    vbox_controls = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
-    gtk_widget_set_size_request (vbox_controls, 160, -1);
-    gtk_widget_set_hexpand(vbox_controls, FALSE);
-    gtk_widget_set_margin_start (vbox_controls, 10);
-    gtk_widget_set_margin_end (vbox_controls, 10);
-    gtk_widget_set_margin_top (vbox_controls, 10);
-    gtk_widget_set_margin_bottom (vbox_controls, 10);
-    gtk_box_append (GTK_BOX (hbox), vbox_controls);
+    viewer->vbox_controls = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_size_request (viewer->vbox_controls, 160, -1);
+    gtk_widget_set_hexpand(viewer->vbox_controls, FALSE);
+    gtk_widget_set_margin_start (viewer->vbox_controls, 10);
+    gtk_widget_set_margin_end (viewer->vbox_controls, 10);
+    gtk_widget_set_margin_top (viewer->vbox_controls, 10);
+    gtk_widget_set_margin_bottom (viewer->vbox_controls, 10);
+    gtk_box_append (GTK_BOX (hbox), viewer->vbox_controls);
+
+    // Hide Button
+    GtkWidget *btn_hide = gtk_button_new_with_label("Hide Panel");
+    g_signal_connect(btn_hide, "clicked", G_CALLBACK(on_hide_controls_clicked), viewer);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), btn_hide);
 
     // Counter
     viewer->lbl_counter = gtk_label_new("Counter: 0");
     gtk_widget_set_halign(viewer->lbl_counter, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(vbox_controls), viewer->lbl_counter);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), viewer->lbl_counter);
 
     GtkWidget *row;
 
     // FPS Control
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(vbox_controls), row);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
     label = gtk_label_new("FPS");
-    gtk_widget_set_size_request(label, 60, -1);
-    gtk_widget_set_halign(label, GTK_ALIGN_START);
     gtk_box_append(GTK_BOX(row), label);
-    const char *fps_opts[] = {"10 Hz", "25 Hz", "50 Hz", "100 Hz", NULL};
+    const char *fps_opts[] = {"1 Hz", "2 Hz", "5 Hz", "10 Hz", "25 Hz", "50 Hz", "100 Hz", NULL};
     viewer->dropdown_fps = gtk_drop_down_new_from_strings(fps_opts);
     gtk_widget_set_hexpand(viewer->dropdown_fps, TRUE);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_fps), 1); // 25Hz default
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_fps), 4); // 25Hz default
     g_signal_connect(viewer->dropdown_fps, "notify::selected", G_CALLBACK(on_fps_changed), viewer);
     gtk_box_append(GTK_BOX(row), viewer->dropdown_fps);
 
-    // Colormap Dropdown
+    viewer->lbl_fps_est = gtk_label_new("0.0 Hz");
+    gtk_box_append(GTK_BOX(row), viewer->lbl_fps_est);
+
+    // Cmap & Scale Row
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(vbox_controls), row);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+
     label = gtk_label_new("Cmap");
-    gtk_widget_set_size_request(label, 60, -1);
-    gtk_widget_set_halign(label, GTK_ALIGN_START);
     gtk_box_append(GTK_BOX(row), label);
     const char *cmap_opts[] = {"Grey", "Red", "Green", "Blue", "Heat", "Cool", "Rainbow", "A", "B", NULL};
     viewer->dropdown_cmap = gtk_drop_down_new_from_strings(cmap_opts);
@@ -1558,12 +1634,7 @@ activate (GtkApplication *app,
     g_signal_connect(viewer->dropdown_cmap, "notify::selected", G_CALLBACK(on_cmap_changed), viewer);
     gtk_box_append(GTK_BOX(row), viewer->dropdown_cmap);
 
-    // Scale Dropdown
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(vbox_controls), row);
     label = gtk_label_new("Scale");
-    gtk_widget_set_size_request(label, 60, -1);
-    gtk_widget_set_halign(label, GTK_ALIGN_START);
     gtk_box_append(GTK_BOX(row), label);
     const char *scale_opts[] = {"Linear", "Log", "Sqrt", "Square", "Asinh", NULL};
     viewer->dropdown_scale = gtk_drop_down_new_from_strings(scale_opts);
@@ -1574,7 +1645,7 @@ activate (GtkApplication *app,
 
     // Zoom Controls
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(vbox_controls), row);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
 
     // Zoom Dropdown
     const char *zoom_levels[] = {"1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x", NULL};
@@ -1595,7 +1666,7 @@ activate (GtkApplication *app,
 
     // Selection Controls
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(vbox_controls), row);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
 
     label = gtk_label_new ("ROI");
     gtk_widget_set_size_request(label, 60, -1);
@@ -1617,7 +1688,7 @@ activate (GtkApplication *app,
 
     // Auto Scale Row
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(vbox_controls), row);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
 
     btn_autoscale = gtk_button_new_with_label ("Auto Scale");
     g_signal_connect (btn_autoscale, "clicked", G_CALLBACK (on_btn_autoscale_clicked), viewer);
@@ -1633,7 +1704,7 @@ activate (GtkApplication *app,
 
     // Manual Levels Row
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(vbox_controls), row);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
 
     viewer->spin_min = gtk_spin_button_new_with_range (-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits (GTK_SPIN_BUTTON (viewer->spin_min), 2);
@@ -1646,10 +1717,6 @@ activate (GtkApplication *app,
     gtk_widget_set_hexpand(viewer->spin_max, TRUE);
     g_signal_connect (viewer->spin_max, "value-changed", G_CALLBACK (on_spin_max_changed), viewer);
     gtk_box_append (GTK_BOX (row), viewer->spin_max);
-
-    btn_reset_colorbar = gtk_button_new_with_label ("Reset Colorbar");
-    g_signal_connect (btn_reset_colorbar, "clicked", G_CALLBACK (on_btn_reset_colorbar_clicked), viewer);
-    gtk_box_append (GTK_BOX (vbox_controls), btn_reset_colorbar);
 
     // Image Display Area with Overlay (Center)
     // Container for Main Image + ROI Image
@@ -1698,6 +1765,17 @@ activate (GtkApplication *app,
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->selection_area), draw_selection_func, viewer, NULL);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->selection_area);
 
+    // Ctrl Overlay Button (Hidden by default, shown when panel hidden)
+    viewer->btn_ctrl_overlay = gtk_button_new_with_label("ctrl");
+    gtk_widget_set_halign(viewer->btn_ctrl_overlay, GTK_ALIGN_START);
+    gtk_widget_set_valign(viewer->btn_ctrl_overlay, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(viewer->btn_ctrl_overlay, 5);
+    gtk_widget_set_margin_top(viewer->btn_ctrl_overlay, 5);
+    gtk_widget_set_opacity(viewer->btn_ctrl_overlay, 0.7);
+    g_signal_connect(viewer->btn_ctrl_overlay, "clicked", G_CALLBACK(on_show_controls_clicked), viewer);
+    gtk_widget_set_visible(viewer->btn_ctrl_overlay, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->btn_ctrl_overlay);
+
     drag_controller = gtk_gesture_drag_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag_controller), 0);
     g_signal_connect(drag_controller, "drag-begin", G_CALLBACK(drag_begin), viewer);
@@ -1714,12 +1792,21 @@ activate (GtkApplication *app,
     gtk_widget_set_margin_bottom(hbox_right, 10);
     gtk_box_append(GTK_BOX(hbox), hbox_right);
 
+    // Colorbar Column
+    GtkWidget *vbox_cbar_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(hbox_right), vbox_cbar_col);
+
     // Colorbar
     viewer->colorbar = gtk_drawing_area_new ();
     gtk_widget_set_size_request (viewer->colorbar, 60, -1);
     gtk_widget_set_vexpand(viewer->colorbar, TRUE);
     gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (viewer->colorbar), draw_colorbar_func, viewer, NULL);
-    gtk_box_append (GTK_BOX (hbox_right), viewer->colorbar);
+    gtk_box_append (GTK_BOX (vbox_cbar_col), viewer->colorbar);
+
+    // Reset Colorbar Small Button
+    btn_reset_colorbar = gtk_button_new_with_label("R");
+    g_signal_connect(btn_reset_colorbar, "clicked", G_CALLBACK(on_btn_reset_colorbar_clicked), viewer);
+    gtk_box_append(GTK_BOX(vbox_cbar_col), btn_reset_colorbar);
 
     // Stats Box
     frame_stats = gtk_frame_new("ROI Stats");

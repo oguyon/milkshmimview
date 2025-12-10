@@ -326,11 +326,22 @@ on_auto_max_toggled (GtkCheckButton *btn, gpointer user_data)
     app->force_redraw = TRUE;
 }
 
+static void update_spin_steps(ViewerApp *app) {
+    if (!app->spin_min || !app->spin_max) return;
+    double range = fabs(app->max_val - app->min_val);
+    double step = range * 0.2;
+    if (step < 1e-9) step = 1.0;
+
+    gtk_spin_button_set_increments(GTK_SPIN_BUTTON(app->spin_min), step, step * 5.0);
+    gtk_spin_button_set_increments(GTK_SPIN_BUTTON(app->spin_max), step, step * 5.0);
+}
+
 static void
 on_spin_min_changed (GtkSpinButton *spin, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->min_val = gtk_spin_button_get_value(spin);
+    update_spin_steps(app);
     app->force_redraw = TRUE;
 }
 
@@ -339,6 +350,7 @@ on_spin_max_changed (GtkSpinButton *spin, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->max_val = gtk_spin_button_get_value(spin);
+    update_spin_steps(app);
     app->force_redraw = TRUE;
 }
 
@@ -1313,6 +1325,8 @@ draw_image (ViewerApp *app)
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_max), max_val);
     }
 
+    update_spin_steps(app);
+
     // Effective min/max for colormap
     double eff_min = min_val + app->cmap_min * (max_val - min_val);
     double eff_max = min_val + app->cmap_max * (max_val - min_val);
@@ -1443,51 +1457,68 @@ activate (GtkApplication *app,
     gtk_widget_set_halign(viewer->lbl_counter, GTK_ALIGN_START);
     gtk_box_append(GTK_BOX(vbox_controls), viewer->lbl_counter);
 
+    GtkWidget *row;
+
     // FPS Control
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(vbox_controls), row);
     label = gtk_label_new("FPS");
+    gtk_widget_set_size_request(label, 60, -1);
     gtk_widget_set_halign(label, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(vbox_controls), label);
+    gtk_box_append(GTK_BOX(row), label);
     const char *fps_opts[] = {"10 Hz", "25 Hz", "50 Hz", "100 Hz", NULL};
     viewer->dropdown_fps = gtk_drop_down_new_from_strings(fps_opts);
+    gtk_widget_set_hexpand(viewer->dropdown_fps, TRUE);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_fps), 1); // 25Hz default
     g_signal_connect(viewer->dropdown_fps, "notify::selected", G_CALLBACK(on_fps_changed), viewer);
-    gtk_box_append(GTK_BOX(vbox_controls), viewer->dropdown_fps);
+    gtk_box_append(GTK_BOX(row), viewer->dropdown_fps);
 
     // Colormap Dropdown
-    label = gtk_label_new("Colormap");
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(vbox_controls), row);
+    label = gtk_label_new("Cmap");
+    gtk_widget_set_size_request(label, 60, -1);
     gtk_widget_set_halign(label, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(vbox_controls), label);
+    gtk_box_append(GTK_BOX(row), label);
     const char *cmap_opts[] = {"Grey", "Red", "Green", "Blue", "Heat", "Cool", "Rainbow", "A", "B", NULL};
     viewer->dropdown_cmap = gtk_drop_down_new_from_strings(cmap_opts);
+    gtk_widget_set_hexpand(viewer->dropdown_cmap, TRUE);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_cmap), COLORMAP_GREY);
     g_signal_connect(viewer->dropdown_cmap, "notify::selected", G_CALLBACK(on_cmap_changed), viewer);
-    gtk_box_append(GTK_BOX(vbox_controls), viewer->dropdown_cmap);
+    gtk_box_append(GTK_BOX(row), viewer->dropdown_cmap);
 
     // Scale Dropdown
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(vbox_controls), row);
     label = gtk_label_new("Scale");
+    gtk_widget_set_size_request(label, 60, -1);
     gtk_widget_set_halign(label, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(vbox_controls), label);
+    gtk_box_append(GTK_BOX(row), label);
     const char *scale_opts[] = {"Linear", "Log", "Sqrt", "Square", "Asinh", NULL};
     viewer->dropdown_scale = gtk_drop_down_new_from_strings(scale_opts);
+    gtk_widget_set_hexpand(viewer->dropdown_scale, TRUE);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_scale), SCALE_LINEAR);
     g_signal_connect(viewer->dropdown_scale, "notify::selected", G_CALLBACK(on_scale_changed), viewer);
-    gtk_box_append(GTK_BOX(vbox_controls), viewer->dropdown_scale);
+    gtk_box_append(GTK_BOX(row), viewer->dropdown_scale);
 
     // Zoom Controls
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(vbox_controls), row);
     label = gtk_label_new ("Zoom");
+    gtk_widget_set_size_request(label, 60, -1);
     gtk_widget_set_halign (label, GTK_ALIGN_START);
-    gtk_box_append (GTK_BOX (vbox_controls), label);
+    gtk_box_append (GTK_BOX (row), label);
+    const char *zoom_levels[] = {"1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x", NULL};
+    viewer->dropdown_zoom = gtk_drop_down_new_from_strings (zoom_levels);
+    gtk_widget_set_hexpand(viewer->dropdown_zoom, TRUE);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_zoom), 3);
+    g_signal_connect (viewer->dropdown_zoom, "notify::selected", G_CALLBACK (on_dropdown_zoom_changed), viewer);
+    gtk_box_append (GTK_BOX (row), viewer->dropdown_zoom);
 
     viewer->btn_fit_window = gtk_check_button_new_with_label ("Fit to Window");
     gtk_check_button_set_active (GTK_CHECK_BUTTON (viewer->btn_fit_window), TRUE);
     g_signal_connect (viewer->btn_fit_window, "toggled", G_CALLBACK (on_fit_window_toggled), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), viewer->btn_fit_window);
-
-    const char *zoom_levels[] = {"1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x", NULL};
-    viewer->dropdown_zoom = gtk_drop_down_new_from_strings (zoom_levels);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_zoom), 3);
-    g_signal_connect (viewer->dropdown_zoom, "notify::selected", G_CALLBACK (on_dropdown_zoom_changed), viewer);
-    gtk_box_append (GTK_BOX (vbox_controls), viewer->dropdown_zoom);
 
     viewer->lbl_zoom = gtk_label_new ("Zoom: 100%");
     gtk_box_append (GTK_BOX (vbox_controls), viewer->lbl_zoom);
@@ -1496,38 +1527,32 @@ activate (GtkApplication *app,
     g_signal_connect(viewer->btn_expand_roi, "toggled", G_CALLBACK(on_btn_expand_roi_toggled), viewer);
     gtk_box_append(GTK_BOX(vbox_controls), viewer->btn_expand_roi);
 
-    // Min Controls
-    label = gtk_label_new ("Min Value");
-    gtk_widget_set_halign (label, GTK_ALIGN_START);
-    gtk_box_append (GTK_BOX (vbox_controls), label);
+    // Auto Scale Row
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(vbox_controls), row);
 
-    viewer->check_min_auto = gtk_check_button_new_with_label ("Auto Min");
+    btn_autoscale = gtk_button_new_with_label ("Auto Scale");
+    g_signal_connect (btn_autoscale, "clicked", G_CALLBACK (on_btn_autoscale_clicked), viewer);
+    gtk_box_append (GTK_BOX (row), btn_autoscale);
+
+    viewer->check_min_auto = gtk_check_button_new_with_label ("Min");
     g_signal_connect (viewer->check_min_auto, "toggled", G_CALLBACK (on_auto_min_toggled), viewer);
-    gtk_box_append (GTK_BOX (vbox_controls), viewer->check_min_auto);
+    gtk_box_append (GTK_BOX (row), viewer->check_min_auto);
 
+    viewer->check_max_auto = gtk_check_button_new_with_label ("Max");
+    g_signal_connect (viewer->check_max_auto, "toggled", G_CALLBACK (on_auto_max_toggled), viewer);
+    gtk_box_append (GTK_BOX (row), viewer->check_max_auto);
+
+    // Manual Levels
     viewer->spin_min = gtk_spin_button_new_with_range (-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits (GTK_SPIN_BUTTON (viewer->spin_min), 2);
     g_signal_connect (viewer->spin_min, "value-changed", G_CALLBACK (on_spin_min_changed), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), viewer->spin_min);
 
-    // Max Controls
-    label = gtk_label_new ("Max Value");
-    gtk_widget_set_halign (label, GTK_ALIGN_START);
-    gtk_box_append (GTK_BOX (vbox_controls), label);
-
-    viewer->check_max_auto = gtk_check_button_new_with_label ("Auto Max");
-    g_signal_connect (viewer->check_max_auto, "toggled", G_CALLBACK (on_auto_max_toggled), viewer);
-    gtk_box_append (GTK_BOX (vbox_controls), viewer->check_max_auto);
-
     viewer->spin_max = gtk_spin_button_new_with_range (-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits (GTK_SPIN_BUTTON (viewer->spin_max), 2);
     g_signal_connect (viewer->spin_max, "value-changed", G_CALLBACK (on_spin_max_changed), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), viewer->spin_max);
-
-    // Buttons
-    btn_autoscale = gtk_button_new_with_label ("Auto Scale");
-    g_signal_connect (btn_autoscale, "clicked", G_CALLBACK (on_btn_autoscale_clicked), viewer);
-    gtk_box_append (GTK_BOX (vbox_controls), btn_autoscale);
 
     btn_reset_colorbar = gtk_button_new_with_label ("Reset Colorbar");
     g_signal_connect (btn_reset_colorbar, "clicked", G_CALLBACK (on_btn_reset_colorbar_clicked), viewer);
@@ -1676,6 +1701,8 @@ activate (GtkApplication *app,
 
     // Default 30ms = 33Hz
     viewer->timeout_id = g_timeout_add (30, update_display, viewer);
+
+    update_spin_steps(viewer);
 
     gtk_window_present (GTK_WINDOW (window));
 }

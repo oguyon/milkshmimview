@@ -115,6 +115,12 @@ typedef struct {
     GtkWidget *entry_stat_median;
     GtkWidget *entry_stat_p01;
     GtkWidget *entry_stat_p09;
+    GtkWidget *entry_stat_sx;
+    GtkWidget *entry_stat_sy;
+    GtkWidget *entry_stat_npix;
+    GtkWidget *entry_stat_cx;
+    GtkWidget *entry_stat_cy;
+    GtkWidget *entry_stat_sum;
 
     GtkWidget *check_histogram;
     GtkWidget *check_hist_log;
@@ -122,6 +128,8 @@ typedef struct {
 
     // ROI Expansion
     GtkWidget *btn_expand_roi;
+    GtkWidget *btn_show_stats;
+    GtkWidget *frame_stats;
     GtkWidget *box_images;
     GtkWidget *scrolled_roi;
     GtkWidget *roi_image_area;
@@ -406,11 +414,28 @@ static void
 on_btn_reset_selection_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    app->selection_active = FALSE;
+    if (app->image) {
+        app->sel_x1 = 0;
+        app->sel_y1 = 0;
+        app->sel_x2 = app->image->md->size[0];
+        app->sel_y2 = app->image->md->size[1];
+        app->selection_active = TRUE;
+    }
     app->force_redraw = TRUE;
-    gtk_widget_set_visible(app->box_stats, FALSE);
+    // Keep stats visible if stats toggle is on
+    gboolean show_stats = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->btn_show_stats));
+    if (app->frame_stats) gtk_widget_set_visible(app->frame_stats, show_stats);
+
     gtk_widget_queue_draw(app->selection_area);
     if (app->roi_image_area) gtk_widget_queue_draw(app->roi_image_area);
+}
+
+static void
+on_btn_show_stats_toggled (GtkCheckButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gboolean active = gtk_check_button_get_active(btn);
+    if (app->frame_stats) gtk_widget_set_visible(app->frame_stats, active);
 }
 
 static void
@@ -1243,6 +1268,22 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
 
     snprintf(buf, sizeof(buf), "%.4g", p09);
     gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_p09), buf);
+
+    // New Stats
+    snprintf(buf, sizeof(buf), "%d", roi_w);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_sx), buf);
+    snprintf(buf, sizeof(buf), "%d", roi_h);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_sy), buf);
+    snprintf(buf, sizeof(buf), "%zu", count);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_npix), buf);
+
+    snprintf(buf, sizeof(buf), "%.1f", x1 + roi_w/2.0);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_cx), buf);
+    snprintf(buf, sizeof(buf), "%.1f", y1 + roi_h/2.0);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_cy), buf);
+
+    snprintf(buf, sizeof(buf), "%.4g", sum);
+    gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_sum), buf);
 }
 
 static void
@@ -1565,6 +1606,11 @@ activate (GtkApplication *app,
     g_signal_connect(viewer->btn_expand_roi, "toggled", G_CALLBACK(on_btn_expand_roi_toggled), viewer);
     gtk_box_append(GTK_BOX(row), viewer->btn_expand_roi);
 
+    viewer->btn_show_stats = gtk_check_button_new_with_label("stats");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(viewer->btn_show_stats), FALSE);
+    g_signal_connect(viewer->btn_show_stats, "toggled", G_CALLBACK(on_btn_show_stats_toggled), viewer);
+    gtk_box_append(GTK_BOX(row), viewer->btn_show_stats);
+
     btn_reset = gtk_button_new_with_label ("reset");
     g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
     gtk_box_append (GTK_BOX (row), btn_reset);
@@ -1742,6 +1788,60 @@ activate (GtkApplication *app,
     gtk_widget_set_can_focus(viewer->entry_stat_p09, FALSE);
     gtk_widget_set_size_request(viewer->entry_stat_p09, 60, -1);
     gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_p09);
+
+    // Size
+    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
+
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("S X"));
+    viewer->entry_stat_sx = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_sx), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_sx, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_sx, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_sx);
+
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Y"));
+    viewer->entry_stat_sy = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_sy), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_sy, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_sy, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_sy);
+
+    // Npix / Sum
+    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
+
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Num"));
+    viewer->entry_stat_npix = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_npix), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_npix, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_npix, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_npix);
+
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Sum"));
+    viewer->entry_stat_sum = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_sum), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_sum, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_sum, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_sum);
+
+    // Center
+    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
+
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("C X"));
+    viewer->entry_stat_cx = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_cx), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_cx, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_cx, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_cx);
+
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Y"));
+    viewer->entry_stat_cy = gtk_entry_new();
+    gtk_editable_set_editable(GTK_EDITABLE(viewer->entry_stat_cy), FALSE);
+    gtk_widget_set_can_focus(viewer->entry_stat_cy, FALSE);
+    gtk_widget_set_size_request(viewer->entry_stat_cy, 60, -1);
+    gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_cy);
 
     // Hist Controls (Hist / Log)
     stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);

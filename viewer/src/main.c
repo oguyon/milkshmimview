@@ -4,6 +4,29 @@
 #include <stdlib.h>
 #include <math.h>
 
+// Enums for Dropdowns
+enum {
+    COLORMAP_GREY = 0,
+    COLORMAP_RED,
+    COLORMAP_GREEN,
+    COLORMAP_BLUE,
+    COLORMAP_HEAT,
+    COLORMAP_COOL,
+    COLORMAP_RAINBOW,
+    COLORMAP_A,
+    COLORMAP_B,
+    COLORMAP_COUNT
+};
+
+enum {
+    SCALE_LINEAR = 0,
+    SCALE_LOG,
+    SCALE_SQRT,
+    SCALE_SQUARE,
+    SCALE_ASINH,
+    SCALE_COUNT
+};
+
 // Application state
 typedef struct {
     IMAGE *image;
@@ -32,6 +55,10 @@ typedef struct {
     // Actual scaling used for display (for colorbar)
     double current_min;
     double current_max;
+
+    // Palette & Scale
+    int colormap_type;
+    int scale_type;
 
     // Control flags
     gboolean force_redraw;
@@ -62,10 +89,14 @@ typedef struct {
     guint32 *hist_data;
     int hist_bins;
     guint32 hist_max_count;
+    double stats_mean;
+    double stats_median;
 
     // UI Widgets
     GtkWidget *lbl_counter;
     GtkWidget *dropdown_fps;
+    GtkWidget *dropdown_cmap;
+    GtkWidget *dropdown_scale;
 
     GtkWidget *spin_min;
     GtkWidget *check_min_auto;
@@ -135,8 +166,101 @@ static GOptionEntry entries[] =
 static void update_zoom_layout(ViewerApp *app);
 static void get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale);
 static void widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy);
-static gboolean update_display (gpointer user_data);
+gboolean update_display (gpointer user_data);
 static void on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data);
+
+// Helper Functions for Color & Scale
+
+static double apply_scaling(double t, int type) {
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+
+    switch (type) {
+        case SCALE_LINEAR: return t;
+        case SCALE_LOG:
+            // Standard Log: log10(1 + 1000*t) / log10(1001)
+            return log10(1.0 + 1000.0 * t) / 3.0;
+        case SCALE_SQRT: return sqrt(t);
+        case SCALE_SQUARE: return t * t;
+        case SCALE_ASINH:
+            // asinh(10*t) / asinh(10)
+            return asinh(10.0 * t) / 2.998;
+        default: return t;
+    }
+}
+
+static void get_colormap_color(double t, int type, double *r, double *g, double *b) {
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+
+    switch (type) {
+        case COLORMAP_GREY:
+            *r = t; *g = t; *b = t;
+            break;
+        case COLORMAP_RED:
+            *r = t; *g = 0; *b = 0;
+            break;
+        case COLORMAP_GREEN:
+            *r = 0; *g = t; *b = 0;
+            break;
+        case COLORMAP_BLUE:
+            *r = 0; *g = 0; *b = t;
+            break;
+        case COLORMAP_HEAT:
+            // Simple Heat: Black -> Red -> Yellow -> White
+            if (t < 0.33) {
+                *r = t / 0.33;
+                *g = 0;
+                *b = 0;
+            } else if (t < 0.66) {
+                *r = 1.0;
+                *g = (t - 0.33) / 0.33;
+                *b = 0;
+            } else {
+                *r = 1.0;
+                *g = 1.0;
+                *b = (t - 0.66) / 0.34;
+            }
+            break;
+        case COLORMAP_COOL:
+            // Cyan -> Magenta
+            *r = t;
+            *g = 1.0 - t;
+            *b = 1.0;
+            break;
+        case COLORMAP_RAINBOW:
+            // Simple HSV walk
+            {
+                double h = (1.0 - t) * 240.0; // Blue to Red
+                double x = 1.0 - fabs(fmod(h / 60.0, 2) - 1.0);
+                if (h < 60) { *r=1; *g=x; *b=0; }
+                else if (h < 120) { *r=x; *g=1; *b=0; }
+                else if (h < 180) { *r=0; *g=1; *b=x; }
+                else if (h < 240) { *r=0; *g=x; *b=1; }
+                else if (h < 300) { *r=x; *g=0; *b=1; }
+                else { *r=1; *g=0; *b=x; }
+            }
+            break;
+        case COLORMAP_A:
+            // DS9 "A": Black-Red-Green-Blue-Yellow-Cyan-Magenta-White approximate
+            // Actually DS9 A is distinct. Let's do a Green-Red-Blue cycle
+            // For now, let's map: 0-0.25 (Black-Red), 0.25-0.5 (Red-White), 0.5-0.75 (White-Blue), 0.75-1 (Blue-Black) - No that's weird.
+            // Let's implement "Real" DS9 A approximation:
+            if (t < 0.5) { *r = t*2; *g = 0; *b = 0; }
+            else { *r = 1; *g = (t-0.5)*2; *b = (t-0.5)*2; }
+            break;
+        case COLORMAP_B:
+            // DS9 "B": Inverse Heat-ish?
+            // Let's do Yellow -> Blue
+            *r = 1.0 - t;
+            *g = 1.0 - t;
+            *b = t;
+            break;
+        default:
+            *r = t; *g = t; *b = t;
+            break;
+    }
+}
 
 // UI Callbacks
 static void
@@ -155,6 +279,22 @@ on_fps_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
         g_source_remove(app->timeout_id);
     }
     app->timeout_id = g_timeout_add(interval, update_display, app);
+}
+
+static void
+on_cmap_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->colormap_type = gtk_drop_down_get_selected(dropdown);
+    app->force_redraw = TRUE;
+}
+
+static void
+on_scale_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->scale_type = gtk_drop_down_get_selected(dropdown);
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -493,7 +633,12 @@ draw_colorbar_func (GtkDrawingArea *area,
         if (val < 0) val = 0;
         if (val > 1) val = 1;
 
-        cairo_set_source_rgb(cr, val, val, val);
+        val = apply_scaling(val, app->scale_type);
+
+        double r, g, b;
+        get_colormap_color(val, app->colormap_type, &r, &g, &b);
+
+        cairo_set_source_rgb(cr, r, g, b);
         cairo_rectangle(cr, bar_x, margin_top + y, bar_width, 1);
         cairo_fill(cr);
     }
@@ -544,6 +689,35 @@ draw_histogram_func (GtkDrawingArea *area,
         double h = ((double)app->hist_data[i] / app->hist_max_count) * height;
         cairo_rectangle(cr, i * bin_width, height - h, bin_width, h);
         cairo_fill(cr);
+    }
+
+    // Draw Mean and Median lines
+    double range = app->current_max - app->current_min;
+    if (range > 0) {
+        // Mean (Cyan)
+        double mean_norm = (app->stats_mean - app->current_min) / range;
+        if (mean_norm >= 0 && mean_norm <= 1.0) {
+            cairo_set_source_rgb(cr, 0, 1, 1);
+            cairo_set_line_width(cr, 2);
+            double x = mean_norm * width;
+            cairo_move_to(cr, x, 0);
+            cairo_line_to(cr, x, height);
+            cairo_stroke(cr);
+        }
+
+        // Median (Magenta)
+        double median_norm = (app->stats_median - app->current_min) / range;
+        if (median_norm >= 0 && median_norm <= 1.0) {
+            cairo_set_source_rgb(cr, 1, 0, 1);
+            cairo_set_line_width(cr, 2);
+            // Dashed for median to distinct if overlapping?
+            // static const double dashes[] = {4.0, 4.0};
+            // cairo_set_dash(cr, dashes, 1, 0);
+            double x = median_norm * width;
+            cairo_move_to(cr, x, 0);
+            cairo_line_to(cr, x, height);
+            cairo_stroke(cr);
+        }
     }
 }
 
@@ -1005,6 +1179,9 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
     double p01 = values[(size_t)(count * 0.1)];
     double p09 = values[(size_t)(count * 0.9)];
 
+    app->stats_mean = mean;
+    app->stats_median = median;
+
     free(values);
 
     char buf[64];
@@ -1167,9 +1344,17 @@ draw_image (ViewerApp *app)
             double norm = (val - eff_min) / (eff_max - eff_min);
             if (norm < 0) norm = 0;
             if (norm > 1) norm = 1;
-            uint8_t pixel_val = (uint8_t)(norm * 255.0);
 
-            row[x] = (255 << 24) | (pixel_val << 16) | (pixel_val << 8) | pixel_val;
+            norm = apply_scaling(norm, app->scale_type);
+
+            double r, g, b;
+            get_colormap_color(norm, app->colormap_type, &r, &g, &b);
+
+            uint8_t br = (uint8_t)(r * 255.0);
+            uint8_t bg = (uint8_t)(g * 255.0);
+            uint8_t bb = (uint8_t)(b * 255.0);
+
+            row[x] = (255 << 24) | (br << 16) | (bg << 8) | bb;
         }
     }
 
@@ -1179,7 +1364,7 @@ draw_image (ViewerApp *app)
     }
 }
 
-static gboolean
+gboolean
 update_display (gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
@@ -1267,6 +1452,26 @@ activate (GtkApplication *app,
     gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_fps), 1); // 25Hz default
     g_signal_connect(viewer->dropdown_fps, "notify::selected", G_CALLBACK(on_fps_changed), viewer);
     gtk_box_append(GTK_BOX(vbox_controls), viewer->dropdown_fps);
+
+    // Colormap Dropdown
+    label = gtk_label_new("Colormap");
+    gtk_widget_set_halign(label, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(vbox_controls), label);
+    const char *cmap_opts[] = {"Grey", "Red", "Green", "Blue", "Heat", "Cool", "Rainbow", "A", "B", NULL};
+    viewer->dropdown_cmap = gtk_drop_down_new_from_strings(cmap_opts);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_cmap), COLORMAP_GREY);
+    g_signal_connect(viewer->dropdown_cmap, "notify::selected", G_CALLBACK(on_cmap_changed), viewer);
+    gtk_box_append(GTK_BOX(vbox_controls), viewer->dropdown_cmap);
+
+    // Scale Dropdown
+    label = gtk_label_new("Scale");
+    gtk_widget_set_halign(label, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(vbox_controls), label);
+    const char *scale_opts[] = {"Linear", "Log", "Sqrt", "Square", "Asinh", NULL};
+    viewer->dropdown_scale = gtk_drop_down_new_from_strings(scale_opts);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_scale), SCALE_LINEAR);
+    g_signal_connect(viewer->dropdown_scale, "notify::selected", G_CALLBACK(on_scale_changed), viewer);
+    gtk_box_append(GTK_BOX(vbox_controls), viewer->dropdown_scale);
 
     // Zoom Controls
     label = gtk_label_new ("Zoom");

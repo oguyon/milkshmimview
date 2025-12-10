@@ -1029,10 +1029,21 @@ drag_begin (GtkGestureDrag *gesture,
     }
 
     if (button == GDK_BUTTON_PRIMARY) { // Left Click
+        GtkEventController *controller = GTK_EVENT_CONTROLLER(gesture);
+        GdkEvent *event = gtk_event_controller_get_current_event(controller);
+        GdkModifierType modifiers = gdk_event_get_modifier_state(event);
+
+        if (!(modifiers & GDK_SHIFT_MASK)) return;
+        if (!app->image) return;
+
         int ix, iy;
         widget_to_image_coords(app, x, y, &ix, &iy);
 
-        if (app->selection_active &&
+        gboolean is_full_frame = (app->sel_x1 <= 0 && app->sel_y1 <= 0 &&
+                                  app->sel_x2 >= app->image->md->size[0] &&
+                                  app->sel_y2 >= app->image->md->size[1]);
+
+        if (app->selection_active && !is_full_frame &&
             ix >= app->sel_x1 && ix <= app->sel_x2 &&
             iy >= app->sel_y1 && iy <= app->sel_y2) {
 

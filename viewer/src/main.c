@@ -669,7 +669,7 @@ draw_colorbar_func (GtkDrawingArea *area,
     cairo_rectangle (cr, bar_x, margin_top, bar_width, bar_height);
     cairo_stroke(cr);
 
-    cairo_set_source_rgb(cr, 0, 0, 0);
+    cairo_set_source_rgb(cr, 1, 1, 1);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 10);
 
@@ -1468,7 +1468,8 @@ activate (GtkApplication *app,
 
     // Sidebar Controls (Left)
     vbox_controls = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
-    // gtk_widget_set_size_request (vbox_controls, 200, -1); // Removed fixed width
+    gtk_widget_set_size_request (vbox_controls, 160, -1);
+    gtk_widget_set_hexpand(vbox_controls, FALSE);
     gtk_widget_set_margin_start (vbox_controls, 10);
     gtk_widget_set_margin_end (vbox_controls, 10);
     gtk_widget_set_margin_top (vbox_controls, 10);

@@ -87,6 +87,12 @@ typedef struct {
 
     GtkWidget *check_histogram;
     GtkWidget *histogram_area;
+
+    // ROI Expansion
+    GtkWidget *btn_expand_roi;
+    GtkWidget *box_images;
+    GtkWidget *scrolled_roi;
+    GtkWidget *roi_image_area;
 } ViewerApp;
 
 // Command line option variables
@@ -244,6 +250,19 @@ on_btn_reset_selection_clicked (GtkButton *btn, gpointer user_data)
     app->force_redraw = TRUE;
     gtk_widget_set_visible(app->box_stats, FALSE);
     gtk_widget_queue_draw(app->selection_area);
+    if (app->roi_image_area) gtk_widget_queue_draw(app->roi_image_area);
+}
+
+static void
+on_btn_expand_roi_toggled (GtkCheckButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gboolean active = gtk_check_button_get_active(btn);
+    if (active) {
+        gtk_widget_set_visible(app->scrolled_roi, TRUE);
+    } else {
+        gtk_widget_set_visible(app->scrolled_roi, FALSE);
+    }
 }
 
 static void
@@ -528,6 +547,73 @@ draw_histogram_func (GtkDrawingArea *area,
     }
 }
 
+// Drawing function for ROI Expansion Area
+static void
+draw_roi_area_func (GtkDrawingArea *area,
+                    cairo_t        *cr,
+                    int             width,
+                    int             height,
+                    gpointer        user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+
+    // Clear background to black
+    cairo_set_source_rgb(cr, 0, 0, 0);
+    cairo_paint(cr);
+
+    if (!app->image || !app->display_buffer || !app->selection_active) {
+        cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, 20);
+        cairo_move_to(cr, 20, 40);
+        cairo_show_text(cr, "No Selection");
+        return;
+    }
+
+    int roi_w = app->sel_x2 - app->sel_x1;
+    int roi_h = app->sel_y2 - app->sel_y1;
+
+    if (roi_w <= 0 || roi_h <= 0) return;
+
+    int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, app->img_width);
+    cairo_surface_t *surface = cairo_image_surface_create_for_data(
+        app->display_buffer,
+        CAIRO_FORMAT_RGB24,
+        app->img_width,
+        app->img_height,
+        stride
+    );
+
+    // We want to draw the sub-rectangle (sel_x1, sel_y1, roi_w, roi_h)
+    // stretched to fit (0, 0, width, height)
+
+    double scale_x = (double)width / roi_w;
+    double scale_y = (double)height / roi_h;
+    // Typically expand to fill, but respect aspect ratio?
+    // "Expand... to the same display size as the main full image" usually implies filling the widget.
+    // Let's preserve aspect ratio to avoid distortion, centering it.
+    double scale = (scale_x < scale_y) ? scale_x : scale_y;
+
+    double draw_w = roi_w * scale;
+    double draw_h = roi_h * scale;
+    double off_x = (width - draw_w) / 2.0;
+    double off_y = (height - draw_h) / 2.0;
+
+    // Clip to widget
+    cairo_rectangle(cr, 0, 0, width, height);
+    cairo_clip(cr);
+
+    cairo_translate(cr, off_x, off_y);
+    cairo_scale(cr, scale, scale);
+    cairo_translate(cr, -app->sel_x1, -app->sel_y1);
+
+    cairo_set_source_surface(cr, surface, 0, 0);
+    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+    cairo_paint(cr);
+
+    cairo_surface_destroy(surface);
+}
+
 // Drawing function for Image Area (Nearest Neighbor)
 static void
 draw_image_area_func (GtkDrawingArea *area,
@@ -769,6 +855,9 @@ drag_update (GtkGestureDrag *gesture,
         app->curr_y = app->start_y + offset_y;
     }
     gtk_widget_queue_draw(app->selection_area);
+    if (app->roi_image_area && gtk_widget_get_visible(app->scrolled_roi)) {
+        gtk_widget_queue_draw(app->roi_image_area);
+    }
 }
 
 static void
@@ -816,6 +905,9 @@ drag_end (GtkGestureDrag *gesture,
 
     app->force_redraw = TRUE;
     gtk_widget_queue_draw(app->selection_area);
+    if (app->roi_image_area && gtk_widget_get_visible(app->scrolled_roi)) {
+        gtk_widget_queue_draw(app->roi_image_area);
+    }
 }
 
 static int compare_doubles(const void *a, const void *b) {
@@ -1082,6 +1174,9 @@ draw_image (ViewerApp *app)
     }
 
     gtk_widget_queue_draw(app->image_area);
+    if (app->roi_image_area && gtk_widget_get_visible(app->scrolled_roi)) {
+        gtk_widget_queue_draw(app->roi_image_area);
+    }
 }
 
 static gboolean
@@ -1192,6 +1287,10 @@ activate (GtkApplication *app,
     viewer->lbl_zoom = gtk_label_new ("Zoom: 100%");
     gtk_box_append (GTK_BOX (vbox_controls), viewer->lbl_zoom);
 
+    viewer->btn_expand_roi = gtk_check_button_new_with_label("Expand ROI");
+    g_signal_connect(viewer->btn_expand_roi, "toggled", G_CALLBACK(on_btn_expand_roi_toggled), viewer);
+    gtk_box_append(GTK_BOX(vbox_controls), viewer->btn_expand_roi);
+
     // Min Controls
     label = gtk_label_new ("Min Value");
     gtk_widget_set_halign (label, GTK_ALIGN_START);
@@ -1239,10 +1338,18 @@ activate (GtkApplication *app,
 
 
     // Image Display Area with Overlay (Center)
+    // Container for Main Image + ROI Image
+    viewer->box_images = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_set_homogeneous(GTK_BOX(viewer->box_images), TRUE);
+    gtk_widget_set_hexpand(viewer->box_images, TRUE);
+    gtk_widget_set_vexpand(viewer->box_images, TRUE);
+    gtk_box_append (GTK_BOX (hbox), viewer->box_images);
+
+    // Main Image
     scrolled_window = gtk_scrolled_window_new ();
     gtk_widget_set_vexpand (scrolled_window, TRUE);
     gtk_widget_set_hexpand (scrolled_window, TRUE);
-    gtk_box_append (GTK_BOX (hbox), scrolled_window);
+    gtk_box_append (GTK_BOX (viewer->box_images), scrolled_window);
 
     scroll_controller = gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
     g_signal_connect (scroll_controller, "scroll", G_CALLBACK (on_scroll), viewer);
@@ -1250,6 +1357,19 @@ activate (GtkApplication *app,
 
     overlay = gtk_overlay_new();
     gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled_window), overlay);
+
+    // ROI Image (Hidden by default)
+    viewer->scrolled_roi = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(viewer->scrolled_roi, TRUE);
+    gtk_widget_set_hexpand(viewer->scrolled_roi, TRUE);
+    gtk_widget_set_visible(viewer->scrolled_roi, FALSE);
+    gtk_box_append(GTK_BOX(viewer->box_images), viewer->scrolled_roi);
+
+    viewer->roi_image_area = gtk_drawing_area_new();
+    gtk_widget_set_hexpand(viewer->roi_image_area, TRUE);
+    gtk_widget_set_vexpand(viewer->roi_image_area, TRUE);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->roi_image_area), draw_roi_area_func, viewer, NULL);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(viewer->scrolled_roi), viewer->roi_image_area);
 
     // Using DrawingArea instead of Picture for manual nearest-neighbor drawing
     viewer->image_area = gtk_drawing_area_new();

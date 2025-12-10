@@ -117,6 +117,7 @@ typedef struct {
     GtkWidget *lbl_stat_p09;
 
     GtkWidget *check_histogram;
+    GtkWidget *check_hist_log;
     GtkWidget *histogram_area;
 
     // ROI Expansion
@@ -304,6 +305,13 @@ on_histogram_toggled (GtkCheckButton *btn, gpointer user_data)
     gboolean active = gtk_check_button_get_active(btn);
     gtk_widget_set_visible(app->histogram_area, active && app->selection_active);
     app->force_redraw = TRUE;
+}
+
+static void
+on_hist_log_toggled (GtkCheckButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gtk_widget_queue_draw(app->histogram_area);
 }
 
 static void
@@ -663,20 +671,29 @@ draw_colorbar_func (GtkDrawingArea *area,
 
     cairo_set_source_rgb(cr, 0, 0, 0);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 12);
+    cairo_set_font_size(cr, 10);
 
     char buf[64];
     cairo_text_extents_t extents;
 
-    snprintf(buf, sizeof(buf), "%.2g", app->max_val); // Label is Data Range
-    cairo_text_extents(cr, buf, &extents);
-    cairo_move_to(cr, (width - extents.width)/2, margin_top - 5);
-    cairo_show_text(cr, buf);
+    int num_ticks = 5;
+    for (int i = 0; i < num_ticks; i++) {
+        double t = (double)i / (num_ticks - 1);
+        double val = app->min_val + t * (app->max_val - app->min_val);
+        double y = height - margin_bottom - t * bar_height;
 
-    snprintf(buf, sizeof(buf), "%.2g", app->min_val); // Label is Data Range
-    cairo_text_extents(cr, buf, &extents);
-    cairo_move_to(cr, (width - extents.width)/2, height - margin_bottom + extents.height + 5);
-    cairo_show_text(cr, buf);
+        snprintf(buf, sizeof(buf), "%.3g", val);
+        cairo_text_extents(cr, buf, &extents);
+
+        // Draw tick
+        cairo_move_to(cr, bar_x + bar_width, y);
+        cairo_line_to(cr, bar_x + bar_width + 5, y);
+        cairo_stroke(cr);
+
+        // Draw Label
+        cairo_move_to(cr, bar_x + bar_width + 8, y + extents.height/2 - 1);
+        cairo_show_text(cr, buf);
+    }
 }
 
 // Drawing function for Histogram
@@ -696,9 +713,15 @@ draw_histogram_func (GtkDrawingArea *area,
     cairo_set_source_rgb(cr, 0.8, 0.8, 0.8); // Light gray bars
 
     double bin_width = (double)width / app->hist_bins;
+    gboolean log_scale = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_hist_log));
+    double max_val = (double)app->hist_max_count;
+    if (log_scale) max_val = log10(max_val + 1.0);
 
     for (int i = 0; i < app->hist_bins; ++i) {
-        double h = ((double)app->hist_data[i] / app->hist_max_count) * height;
+        double val = (double)app->hist_data[i];
+        if (log_scale) val = log10(val + 1.0);
+
+        double h = (val / max_val) * height;
         cairo_rectangle(cr, i * bin_width, height - h, bin_width, h);
         cairo_fill(cr);
     }
@@ -1445,7 +1468,7 @@ activate (GtkApplication *app,
 
     // Sidebar Controls (Left)
     vbox_controls = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
-    gtk_widget_set_size_request (vbox_controls, 200, -1);
+    // gtk_widget_set_size_request (vbox_controls, 200, -1); // Removed fixed width
     gtk_widget_set_margin_start (vbox_controls, 10);
     gtk_widget_set_margin_end (vbox_controls, 10);
     gtk_widget_set_margin_top (vbox_controls, 10);
@@ -1504,28 +1527,43 @@ activate (GtkApplication *app,
     // Zoom Controls
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_append(GTK_BOX(vbox_controls), row);
-    label = gtk_label_new ("Zoom");
-    gtk_widget_set_size_request(label, 60, -1);
-    gtk_widget_set_halign (label, GTK_ALIGN_START);
-    gtk_box_append (GTK_BOX (row), label);
+
+    // Zoom Dropdown
     const char *zoom_levels[] = {"1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x", NULL};
     viewer->dropdown_zoom = gtk_drop_down_new_from_strings (zoom_levels);
-    gtk_widget_set_hexpand(viewer->dropdown_zoom, TRUE);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_zoom), 3);
     g_signal_connect (viewer->dropdown_zoom, "notify::selected", G_CALLBACK (on_dropdown_zoom_changed), viewer);
     gtk_box_append (GTK_BOX (row), viewer->dropdown_zoom);
 
-    viewer->btn_fit_window = gtk_check_button_new_with_label ("Fit to Window");
+    // Fit Toggle
+    viewer->btn_fit_window = gtk_check_button_new_with_label ("fit");
     gtk_check_button_set_active (GTK_CHECK_BUTTON (viewer->btn_fit_window), TRUE);
     g_signal_connect (viewer->btn_fit_window, "toggled", G_CALLBACK (on_fit_window_toggled), viewer);
-    gtk_box_append (GTK_BOX (vbox_controls), viewer->btn_fit_window);
+    gtk_box_append (GTK_BOX (row), viewer->btn_fit_window);
 
-    viewer->lbl_zoom = gtk_label_new ("Zoom: 100%");
-    gtk_box_append (GTK_BOX (vbox_controls), viewer->lbl_zoom);
+    // Zoom Label
+    viewer->lbl_zoom = gtk_label_new ("100%");
+    gtk_box_append (GTK_BOX (row), viewer->lbl_zoom);
+
+    // Selection Controls
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(vbox_controls), row);
 
     viewer->btn_expand_roi = gtk_check_button_new_with_label("Expand ROI");
     g_signal_connect(viewer->btn_expand_roi, "toggled", G_CALLBACK(on_btn_expand_roi_toggled), viewer);
-    gtk_box_append(GTK_BOX(vbox_controls), viewer->btn_expand_roi);
+    gtk_box_append(GTK_BOX(row), viewer->btn_expand_roi);
+
+    btn_reset = gtk_button_new_with_label ("reset");
+    g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
+    gtk_box_append (GTK_BOX (row), btn_reset);
+
+    viewer->check_histogram = gtk_check_button_new_with_label("hist");
+    g_signal_connect(viewer->check_histogram, "toggled", G_CALLBACK(on_histogram_toggled), viewer);
+    gtk_box_append(GTK_BOX(row), viewer->check_histogram);
+
+    viewer->check_hist_log = gtk_check_button_new_with_label("log");
+    g_signal_connect(viewer->check_hist_log, "toggled", G_CALLBACK(on_hist_log_toggled), viewer);
+    gtk_box_append(GTK_BOX(row), viewer->check_hist_log);
 
     // Auto Scale Row
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
@@ -1543,29 +1581,25 @@ activate (GtkApplication *app,
     g_signal_connect (viewer->check_max_auto, "toggled", G_CALLBACK (on_auto_max_toggled), viewer);
     gtk_box_append (GTK_BOX (row), viewer->check_max_auto);
 
-    // Manual Levels
+    // Manual Levels Row
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(vbox_controls), row);
+
     viewer->spin_min = gtk_spin_button_new_with_range (-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits (GTK_SPIN_BUTTON (viewer->spin_min), 2);
+    gtk_widget_set_hexpand(viewer->spin_min, TRUE);
     g_signal_connect (viewer->spin_min, "value-changed", G_CALLBACK (on_spin_min_changed), viewer);
-    gtk_box_append (GTK_BOX (vbox_controls), viewer->spin_min);
+    gtk_box_append (GTK_BOX (row), viewer->spin_min);
 
     viewer->spin_max = gtk_spin_button_new_with_range (-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits (GTK_SPIN_BUTTON (viewer->spin_max), 2);
+    gtk_widget_set_hexpand(viewer->spin_max, TRUE);
     g_signal_connect (viewer->spin_max, "value-changed", G_CALLBACK (on_spin_max_changed), viewer);
-    gtk_box_append (GTK_BOX (vbox_controls), viewer->spin_max);
+    gtk_box_append (GTK_BOX (row), viewer->spin_max);
 
     btn_reset_colorbar = gtk_button_new_with_label ("Reset Colorbar");
     g_signal_connect (btn_reset_colorbar, "clicked", G_CALLBACK (on_btn_reset_colorbar_clicked), viewer);
     gtk_box_append (GTK_BOX (vbox_controls), btn_reset_colorbar);
-
-    btn_reset = gtk_button_new_with_label ("Reset Selection");
-    g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
-    gtk_box_append (GTK_BOX (vbox_controls), btn_reset);
-
-    viewer->check_histogram = gtk_check_button_new_with_label("Show Histogram");
-    g_signal_connect(viewer->check_histogram, "toggled", G_CALLBACK(on_histogram_toggled), viewer);
-    gtk_box_append(GTK_BOX(vbox_controls), viewer->check_histogram);
-
 
     // Image Display Area with Overlay (Center)
     // Container for Main Image + ROI Image
@@ -1674,7 +1708,7 @@ activate (GtkApplication *app,
 
     // Histogram
     viewer->histogram_area = gtk_drawing_area_new();
-    gtk_widget_set_size_request(viewer->histogram_area, 150, 100);
+    gtk_widget_set_size_request(viewer->histogram_area, 150, 200);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->histogram_area), draw_histogram_func, viewer, NULL);
     gtk_widget_set_visible(viewer->histogram_area, FALSE);
     gtk_box_append(GTK_BOX(viewer->box_stats), viewer->histogram_area);

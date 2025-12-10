@@ -1556,21 +1556,18 @@ activate (GtkApplication *app,
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_append(GTK_BOX(vbox_controls), row);
 
-    viewer->btn_expand_roi = gtk_check_button_new_with_label("Expand ROI");
+    label = gtk_label_new ("ROI");
+    gtk_widget_set_size_request(label, 60, -1);
+    gtk_widget_set_halign (label, GTK_ALIGN_START);
+    gtk_box_append (GTK_BOX (row), label);
+
+    viewer->btn_expand_roi = gtk_check_button_new_with_label("show");
     g_signal_connect(viewer->btn_expand_roi, "toggled", G_CALLBACK(on_btn_expand_roi_toggled), viewer);
     gtk_box_append(GTK_BOX(row), viewer->btn_expand_roi);
 
     btn_reset = gtk_button_new_with_label ("reset");
     g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
     gtk_box_append (GTK_BOX (row), btn_reset);
-
-    viewer->check_histogram = gtk_check_button_new_with_label("hist");
-    g_signal_connect(viewer->check_histogram, "toggled", G_CALLBACK(on_histogram_toggled), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->check_histogram);
-
-    viewer->check_hist_log = gtk_check_button_new_with_label("log");
-    g_signal_connect(viewer->check_hist_log, "toggled", G_CALLBACK(on_hist_log_toggled), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->check_hist_log);
 
     // Auto Scale Row
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
@@ -1745,6 +1742,18 @@ activate (GtkApplication *app,
     gtk_widget_set_can_focus(viewer->entry_stat_p09, FALSE);
     gtk_widget_set_size_request(viewer->entry_stat_p09, 60, -1);
     gtk_box_append(GTK_BOX(stat_row), viewer->entry_stat_p09);
+
+    // Hist Controls (Hist / Log)
+    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
+
+    viewer->check_histogram = gtk_check_button_new_with_label("hist");
+    g_signal_connect(viewer->check_histogram, "toggled", G_CALLBACK(on_histogram_toggled), viewer);
+    gtk_box_append(GTK_BOX(stat_row), viewer->check_histogram);
+
+    viewer->check_hist_log = gtk_check_button_new_with_label("log");
+    g_signal_connect(viewer->check_hist_log, "toggled", G_CALLBACK(on_hist_log_toggled), viewer);
+    gtk_box_append(GTK_BOX(stat_row), viewer->check_hist_log);
 
     // Histogram
     viewer->histogram_area = gtk_drawing_area_new();

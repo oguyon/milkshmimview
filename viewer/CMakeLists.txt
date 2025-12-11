@@ -11,3 +11,6 @@ link_directories(${GTK4_LIBRARY_DIRS} ${ISIO_LIBRARY_DIRS})
 add_executable(milkshmimview src/main.c)
 target_link_libraries(milkshmimview ${GTK4_LIBRARIES} ${ISIO_LIBRARIES} m)
 target_compile_options(milkshmimview PUBLIC ${GTK4_CFLAGS_OTHER})
+
+add_executable(earth_stream src/earth_stream.c)
+target_link_libraries(earth_stream ${ISIO_LIBRARIES} m)

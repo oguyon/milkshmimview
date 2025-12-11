@@ -1830,7 +1830,7 @@ activate (GtkApplication *app,
 
     // Stats Panel Container (Right)
     viewer->vbox_stats = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_widget_set_visible(viewer->vbox_stats, FALSE); // Start hidden
+    gtk_widget_set_visible(viewer->vbox_stats, TRUE); // Start visible
     gtk_box_append(GTK_BOX(hbox_right), viewer->vbox_stats);
 
     // Hide Stats Button (Top of Stats Panel)

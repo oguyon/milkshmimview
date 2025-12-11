@@ -475,6 +475,7 @@ on_btn_show_stats_toggled (GtkCheckButton *btn, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     gboolean active = gtk_check_button_get_active(btn);
     if (app->frame_stats) gtk_widget_set_visible(app->frame_stats, active);
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -1365,7 +1366,7 @@ draw_image (ViewerApp *app)
     app->img_height = height;
 
     // Calculate Stats if selection active
-    if (app->selection_active) {
+    if (app->selection_active && gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_show_stats))) {
         calculate_roi_stats(app, raw_data, width, height, datatype);
     }
 

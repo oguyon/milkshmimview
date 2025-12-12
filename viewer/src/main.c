@@ -100,6 +100,7 @@ typedef struct {
     double *trace_min;
     double *trace_max;
     double *trace_mean;
+    double *trace_median;
     double *trace_p01;
     double *trace_p09;
     int trace_head;
@@ -416,7 +417,7 @@ on_leave (GtkEventControllerMotion *controller,
     GtkWidget *widget = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(controller));
     ViewerApp *app = (ViewerApp *)user_data;
 
-    if (widget == app->image_area) {
+    if (widget == app->selection_area) {
         gtk_widget_set_visible(app->lbl_pixel_info_main, FALSE);
     } else if (widget == app->roi_image_area) {
         gtk_widget_set_visible(app->lbl_pixel_info_roi, FALSE);
@@ -1108,7 +1109,7 @@ draw_histogram_func (GtkDrawingArea *area,
 }
 
 static void
-update_trace_data(ViewerApp *app, double min, double max, double mean, double p01, double p09) {
+update_trace_data(ViewerApp *app, double min, double max, double mean, double median, double p01, double p09) {
     if (!app->trace_active) return;
 
     struct timespec now;
@@ -1122,6 +1123,7 @@ update_trace_data(ViewerApp *app, double min, double max, double mean, double p0
     app->trace_min[idx] = min;
     app->trace_max[idx] = max;
     app->trace_mean[idx] = mean;
+    app->trace_median[idx] = median;
     app->trace_p01[idx] = p01;
     app->trace_p09[idx] = p09;
 
@@ -1215,6 +1217,17 @@ draw_trace_func (GtkDrawingArea *area,
         int idx = (start_idx + i) % TRACE_MAX_SAMPLES;
         double x = MAP_X(app->trace_time[idx]);
         double y = MAP_Y(app->trace_mean[idx]);
+        if (i==0) cairo_move_to(cr, x, y);
+        else cairo_line_to(cr, x, y);
+    }
+    cairo_stroke(cr);
+
+    // Median - Yellow
+    cairo_set_source_rgb(cr, 1, 1, 0);
+    for (int i = 0; i < visible_count; ++i) {
+        int idx = (start_idx + i) % TRACE_MAX_SAMPLES;
+        double x = MAP_X(app->trace_time[idx]);
+        double y = MAP_Y(app->trace_median[idx]);
         if (i==0) cairo_move_to(cr, x, y);
         else cairo_line_to(cr, x, y);
     }
@@ -1762,6 +1775,8 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
     snprintf(buf, sizeof(buf), "%.4g", p09);
     gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_p09), buf);
 
+    update_trace_data(app, min_v, max_v, mean, median, p01, p09);
+
     // New Stats
     snprintf(buf, sizeof(buf), "%zu", count);
     gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_npix), buf);
@@ -1964,6 +1979,7 @@ update_display (gpointer user_data)
         app->sel_x2 = app->image->md->size[0];
         app->sel_y2 = app->image->md->size[1];
         app->selection_active = TRUE;
+        gtk_widget_set_visible(app->box_stats, TRUE);
 
         // Set Window Title
         GtkWindow *win = GTK_WINDOW(gtk_widget_get_root(app->image_area));
@@ -2193,11 +2209,26 @@ activate (GtkApplication *app,
     gtk_widget_set_visible(viewer->scrolled_roi, FALSE);
     gtk_box_append(GTK_BOX(viewer->box_images), viewer->scrolled_roi);
 
+    GtkWidget *overlay_roi = gtk_overlay_new();
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(viewer->scrolled_roi), overlay_roi);
+
     viewer->roi_image_area = gtk_drawing_area_new();
     gtk_widget_set_hexpand(viewer->roi_image_area, TRUE);
     gtk_widget_set_vexpand(viewer->roi_image_area, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->roi_image_area), draw_roi_area_func, viewer, NULL);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(viewer->scrolled_roi), viewer->roi_image_area);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay_roi), viewer->roi_image_area);
+
+    viewer->lbl_pixel_info_roi = gtk_label_new("");
+    gtk_widget_set_halign(viewer->lbl_pixel_info_roi, GTK_ALIGN_END);
+    gtk_widget_set_valign(viewer->lbl_pixel_info_roi, GTK_ALIGN_END);
+    gtk_widget_set_margin_end(viewer->lbl_pixel_info_roi, 5);
+    gtk_widget_set_margin_bottom(viewer->lbl_pixel_info_roi, 5);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay_roi), viewer->lbl_pixel_info_roi);
+
+    GtkEventController *roi_motion = gtk_event_controller_motion_new();
+    g_signal_connect(roi_motion, "motion", G_CALLBACK(on_motion_roi), viewer);
+    g_signal_connect(roi_motion, "leave", G_CALLBACK(on_leave), viewer);
+    gtk_widget_add_controller(viewer->roi_image_area, roi_motion);
 
     // Using DrawingArea instead of Picture for manual nearest-neighbor drawing
     viewer->image_area = gtk_drawing_area_new();
@@ -2412,6 +2443,28 @@ activate (GtkApplication *app,
     g_signal_connect(hist_motion, "leave", G_CALLBACK(on_leave_hist), viewer);
     gtk_widget_add_controller(viewer->histogram_area, hist_motion);
 
+    // Trace Controls
+    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
+
+    viewer->check_trace = gtk_check_button_new_with_label("trace");
+    g_signal_connect(viewer->check_trace, "toggled", G_CALLBACK(on_trace_toggled), viewer);
+    gtk_box_append(GTK_BOX(stat_row), viewer->check_trace);
+
+    gtk_box_append(GTK_BOX(stat_row), gtk_label_new("Dur:"));
+
+    viewer->spin_trace_dur = gtk_spin_button_new_with_range(1.0, 3600.0, 1.0);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(viewer->spin_trace_dur), viewer->trace_duration);
+    g_signal_connect(viewer->spin_trace_dur, "value-changed", G_CALLBACK(on_trace_dur_changed), viewer);
+    gtk_box_append(GTK_BOX(stat_row), viewer->spin_trace_dur);
+
+    // Trace Area
+    viewer->trace_area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(viewer->trace_area, 150, 150);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->trace_area), draw_trace_func, viewer, NULL);
+    gtk_widget_set_visible(viewer->trace_area, FALSE); // Hidden by default
+    gtk_box_append(GTK_BOX(viewer->box_stats), viewer->trace_area);
+
     gtk_widget_set_visible(viewer->box_stats, FALSE);
 
 
@@ -2469,6 +2522,16 @@ main (int    argc,
     viewer.fixed_min = has_min;
     viewer.fixed_max = has_max;
 
+    // Allocate Trace Memory
+    viewer.trace_time = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+    viewer.trace_min = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+    viewer.trace_max = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+    viewer.trace_mean = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+    viewer.trace_median = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+    viewer.trace_p01 = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+    viewer.trace_p09 = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+    viewer.trace_duration = 60.0; // Default 60s
+
     app = gtk_application_new ("org.milk.shmimview", G_APPLICATION_NON_UNIQUE);
     g_signal_connect (app, "activate", G_CALLBACK (activate), &viewer);
     status = g_application_run (G_APPLICATION (app), 0, NULL);
@@ -2485,6 +2548,7 @@ main (int    argc,
     if (viewer.trace_min) free(viewer.trace_min);
     if (viewer.trace_max) free(viewer.trace_max);
     if (viewer.trace_mean) free(viewer.trace_mean);
+    if (viewer.trace_median) free(viewer.trace_median);
     if (viewer.trace_p01) free(viewer.trace_p01);
     if (viewer.trace_p09) free(viewer.trace_p09);
 

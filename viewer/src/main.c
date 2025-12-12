@@ -65,6 +65,7 @@ typedef struct {
 
     // Control flags
     gboolean force_redraw;
+    gboolean paused;
 
     // Selection state (Left Click)
     gboolean selection_active;
@@ -168,6 +169,7 @@ typedef struct {
     GtkWidget *btn_ctrl_overlay;
     GtkWidget *btn_stats_overlay;
     GtkWidget *lbl_fps_est;
+    GtkWidget *btn_pause;
     struct timespec last_fps_time;
     uint64_t last_fps_cnt;
 } ViewerApp;
@@ -446,6 +448,13 @@ on_leave_hist (GtkEventControllerMotion *controller,
     ViewerApp *app = (ViewerApp *)user_data;
     app->hist_mouse_active = FALSE;
     gtk_widget_queue_draw(app->histogram_area);
+}
+
+static void
+on_pause_toggled (GtkToggleButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->paused = gtk_toggle_button_get_active(btn);
 }
 
 // UI Callbacks
@@ -2013,12 +2022,14 @@ update_display (gpointer user_data)
 
     static uint64_t last_cnt0 = 0;
 
-    if (app->image->md->cnt0 != last_cnt0 || app->force_redraw) {
-        if (app->image->md->write) {
+    gboolean new_frame = (!app->paused && app->image->md->cnt0 != last_cnt0);
+
+    if (new_frame || app->force_redraw) {
+        if (new_frame && app->image->md->write) {
              return G_SOURCE_CONTINUE;
         }
 
-        last_cnt0 = app->image->md->cnt0;
+        if (new_frame) last_cnt0 = app->image->md->cnt0;
         app->force_redraw = FALSE;
         draw_image(app);
     }
@@ -2088,6 +2099,11 @@ activate (GtkApplication *app,
 
     viewer->lbl_fps_est = gtk_label_new("0.0 Hz");
     gtk_box_append(GTK_BOX(row), viewer->lbl_fps_est);
+
+    // Pause Button
+    viewer->btn_pause = gtk_toggle_button_new_with_label("Pause");
+    g_signal_connect(viewer->btn_pause, "toggled", G_CALLBACK(on_pause_toggled), viewer);
+    gtk_box_append(GTK_BOX(row), viewer->btn_pause);
 
     // Cmap & Scale Row
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);

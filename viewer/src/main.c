@@ -42,6 +42,11 @@ typedef struct {
     // Image Data Buffer for Cairo
     guchar *display_buffer;
     size_t display_buffer_size;
+
+    // Raw Data Buffer (Cache for Pause)
+    void *raw_buffer;
+    size_t raw_buffer_size;
+
     int img_width;
     int img_height;
 
@@ -1805,30 +1810,46 @@ draw_image (ViewerApp *app)
 {
     if (!app->image || !app->image->array.raw) return;
 
-    void *raw_data = NULL;
-
-    if (app->image->md->imagetype & CIRCULAR_BUFFER) {
-        if (app->image->md->naxis == 3) {
-            uint64_t slice_index = app->image->md->cnt1 % app->image->md->size[2];
-            size_t element_size = ImageStreamIO_typesize(app->image->md->datatype);
-            size_t frame_size = app->image->md->size[0] * app->image->md->size[1] * element_size;
-            raw_data = (char*)app->image->array.raw + (slice_index * frame_size);
-        } else {
-             raw_data = app->image->array.raw;
-        }
-    } else {
-        raw_data = app->image->array.raw;
-    }
-
-    if (!raw_data) return;
-
     int width = app->image->md->size[0];
     int height = app->image->md->size[1];
     uint8_t datatype = app->image->md->datatype;
+    size_t element_size = ImageStreamIO_typesize(datatype);
+    size_t frame_size = width * height * element_size;
+
+    // Manage Raw Buffer
+    if (!app->raw_buffer || app->raw_buffer_size < frame_size) {
+        if (app->raw_buffer) free(app->raw_buffer);
+        app->raw_buffer = malloc(frame_size);
+        app->raw_buffer_size = frame_size;
+    }
+
+    // If not paused, copy fresh data. If paused, keep existing data.
+    if (!app->paused) {
+        void *src_ptr = NULL;
+        if (app->image->md->imagetype & CIRCULAR_BUFFER) {
+            if (app->image->md->naxis == 3) {
+                uint64_t slice_index = app->image->md->cnt1 % app->image->md->size[2];
+                src_ptr = (char*)app->image->array.raw + (slice_index * frame_size);
+            } else {
+                 src_ptr = app->image->array.raw;
+            }
+        } else {
+            src_ptr = app->image->array.raw;
+        }
+
+        if (src_ptr) {
+            memcpy(app->raw_buffer, src_ptr, frame_size);
+        }
+    }
+
+    void *raw_data = app->raw_buffer;
+    if (!raw_data) return;
+
     app->img_width = width;
     app->img_height = height;
 
-    // Calculate Stats if selection active
+    // Calculate Stats if selection active (and we are running, or forced update)
+    // When paused, we might still want to update stats if ROI moves, so we allow it.
     if (app->selection_active && gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update))) {
         calculate_roi_stats(app, raw_data, width, height, datatype);
     }
@@ -2559,6 +2580,7 @@ main (int    argc,
         free(viewer.image);
     }
     if (viewer.display_buffer) free(viewer.display_buffer);
+    if (viewer.raw_buffer) free(viewer.raw_buffer);
     if (viewer.hist_data) free(viewer.hist_data);
 
     if (viewer.trace_time) free(viewer.trace_time);

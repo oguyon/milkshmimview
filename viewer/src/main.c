@@ -164,7 +164,7 @@ typedef struct {
     // ROI Expansion
     GtkWidget *btn_expand_roi;
     GtkWidget *frame_stats;
-    GtkWidget *box_images;
+    GtkWidget *paned_images;
     GtkWidget *scrolled_roi;
     GtkWidget *roi_image_area;
 
@@ -335,7 +335,9 @@ static void get_colormap_color(double t, int type, double *r, double *g, double 
 
 static void
 update_pixel_info(ViewerApp *app, GtkWidget *label, double x, double y, gboolean roi_context) {
-    if (!app->image || !app->image->array.raw) return;
+    // Use cached buffer if available (handles pause), otherwise fallback to live stream
+    void *data_source = app->raw_buffer ? app->raw_buffer : (app->image ? app->image->array.raw : NULL);
+    if (!data_source || !app->image) return;
 
     int ix = 0, iy = 0;
 
@@ -370,13 +372,13 @@ update_pixel_info(ViewerApp *app, GtkWidget *label, double x, double y, gboolean
         size_t idx = iy * app->image->md->size[0] + ix;
         double val = 0;
         switch (app->image->md->datatype) {
-            case _DATATYPE_FLOAT: val = ((float*)app->image->array.raw)[idx]; break;
-            case _DATATYPE_DOUBLE: val = ((double*)app->image->array.raw)[idx]; break;
-            case _DATATYPE_UINT8: val = ((uint8_t*)app->image->array.raw)[idx]; break;
-            case _DATATYPE_INT16: val = ((int16_t*)app->image->array.raw)[idx]; break;
-            case _DATATYPE_UINT16: val = ((uint16_t*)app->image->array.raw)[idx]; break;
-            case _DATATYPE_INT32: val = ((int32_t*)app->image->array.raw)[idx]; break;
-            case _DATATYPE_UINT32: val = ((uint32_t*)app->image->array.raw)[idx]; break;
+            case _DATATYPE_FLOAT: val = ((float*)data_source)[idx]; break;
+            case _DATATYPE_DOUBLE: val = ((double*)data_source)[idx]; break;
+            case _DATATYPE_UINT8: val = ((uint8_t*)data_source)[idx]; break;
+            case _DATATYPE_INT16: val = ((int16_t*)data_source)[idx]; break;
+            case _DATATYPE_UINT16: val = ((uint16_t*)data_source)[idx]; break;
+            case _DATATYPE_INT32: val = ((int32_t*)data_source)[idx]; break;
+            case _DATATYPE_UINT32: val = ((uint32_t*)data_source)[idx]; break;
             default: val = 0; break;
         }
 
@@ -2082,8 +2084,9 @@ activate (GtkApplication *app,
     gtk_window_set_title (GTK_WINDOW (window), "ImageStreamIO Viewer");
     gtk_window_set_default_size (GTK_WINDOW (window), 1000, 700);
 
-    hbox = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_window_set_child (GTK_WINDOW (window), hbox);
+    GtkWidget *paned_root = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_position(GTK_PANED(paned_root), 200);
+    gtk_window_set_child(GTK_WINDOW(window), paned_root);
 
     // Sidebar Controls (Left)
     viewer->vbox_controls = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
@@ -2093,7 +2096,10 @@ activate (GtkApplication *app,
     gtk_widget_set_margin_end (viewer->vbox_controls, 10);
     gtk_widget_set_margin_top (viewer->vbox_controls, 10);
     gtk_widget_set_margin_bottom (viewer->vbox_controls, 10);
-    gtk_box_append (GTK_BOX (hbox), viewer->vbox_controls);
+
+    gtk_paned_set_start_child(GTK_PANED(paned_root), viewer->vbox_controls);
+    gtk_paned_set_resize_start_child(GTK_PANED(paned_root), FALSE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(paned_root), FALSE);
 
     // Hide Button
     GtkWidget *btn_hide = gtk_button_new_with_label("Hide Panel");
@@ -2219,19 +2225,28 @@ activate (GtkApplication *app,
     g_signal_connect (viewer->spin_max, "value-changed", G_CALLBACK (on_spin_max_changed), viewer);
     gtk_box_append (GTK_BOX (row), viewer->spin_max);
 
-    // Image Display Area with Overlay (Center)
-    // Container for Main Image + ROI Image
-    viewer->box_images = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_set_homogeneous(GTK_BOX(viewer->box_images), TRUE);
-    gtk_widget_set_hexpand(viewer->box_images, TRUE);
-    gtk_widget_set_vexpand(viewer->box_images, TRUE);
-    gtk_box_append (GTK_BOX (hbox), viewer->box_images);
+    // Middle Paned (Images vs Right Panel)
+    GtkWidget *paned_mid = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_end_child(GTK_PANED(paned_root), paned_mid);
+    gtk_paned_set_resize_end_child(GTK_PANED(paned_root), TRUE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(paned_root), FALSE);
+
+    // Images Paned (Main Image vs ROI Image)
+    viewer->paned_images = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_paned_set_start_child(GTK_PANED(paned_mid), viewer->paned_images);
+    gtk_paned_set_resize_start_child(GTK_PANED(paned_mid), TRUE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(paned_mid), FALSE);
+
+    gtk_paned_set_position(GTK_PANED(viewer->paned_images), 400);
 
     // Main Image
     scrolled_window = gtk_scrolled_window_new ();
     gtk_widget_set_vexpand (scrolled_window, TRUE);
     gtk_widget_set_hexpand (scrolled_window, TRUE);
-    gtk_box_append (GTK_BOX (viewer->box_images), scrolled_window);
+
+    gtk_paned_set_start_child(GTK_PANED(viewer->paned_images), scrolled_window);
+    gtk_paned_set_resize_start_child(GTK_PANED(viewer->paned_images), TRUE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(viewer->paned_images), TRUE);
 
     scroll_controller = gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
     g_signal_connect (scroll_controller, "scroll", G_CALLBACK (on_scroll), viewer);
@@ -2245,7 +2260,10 @@ activate (GtkApplication *app,
     gtk_widget_set_vexpand(viewer->scrolled_roi, TRUE);
     gtk_widget_set_hexpand(viewer->scrolled_roi, TRUE);
     gtk_widget_set_visible(viewer->scrolled_roi, FALSE);
-    gtk_box_append(GTK_BOX(viewer->box_images), viewer->scrolled_roi);
+
+    gtk_paned_set_end_child(GTK_PANED(viewer->paned_images), viewer->scrolled_roi);
+    gtk_paned_set_resize_end_child(GTK_PANED(viewer->paned_images), TRUE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(viewer->paned_images), TRUE);
 
     GtkWidget *overlay_roi = gtk_overlay_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(viewer->scrolled_roi), overlay_roi);
@@ -2330,7 +2348,10 @@ activate (GtkApplication *app,
     gtk_widget_set_margin_end(hbox_right, 10);
     gtk_widget_set_margin_top(hbox_right, 10);
     gtk_widget_set_margin_bottom(hbox_right, 10);
-    gtk_box_append(GTK_BOX(hbox), hbox_right);
+
+    gtk_paned_set_end_child(GTK_PANED(paned_mid), hbox_right);
+    gtk_paned_set_resize_end_child(GTK_PANED(paned_mid), FALSE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(paned_mid), FALSE);
 
     // Colorbar Column
     GtkWidget *vbox_cbar_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);

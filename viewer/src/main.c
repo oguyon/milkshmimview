@@ -6,6 +6,7 @@
 #include <time.h>
 
 #define TRACE_MAX_SAMPLES 360000
+#define TRACE_HIST_BINS 256
 
 // Enums for Dropdowns
 enum {
@@ -109,6 +110,12 @@ typedef struct {
     double *trace_median;
     double *trace_p01;
     double *trace_p09;
+
+    // Trace Histogram Data (Waterfall)
+    uint32_t *trace_hist_data;
+    double *trace_hist_min;
+    double *trace_hist_max;
+
     int trace_head;
     int trace_count;
     struct timespec trace_start_time;
@@ -1125,7 +1132,8 @@ draw_histogram_func (GtkDrawingArea *area,
 }
 
 static void
-update_trace_data(ViewerApp *app, double min, double max, double mean, double median, double p01, double p09) {
+update_trace_data(ViewerApp *app, double min, double max, double mean, double median, double p01, double p09,
+                  uint32_t *hist, double hist_min, double hist_max) {
     if (!app->trace_active) return;
 
     struct timespec now;
@@ -1142,6 +1150,16 @@ update_trace_data(ViewerApp *app, double min, double max, double mean, double me
     app->trace_median[idx] = median;
     app->trace_p01[idx] = p01;
     app->trace_p09[idx] = p09;
+
+    if (hist) {
+        memcpy(app->trace_hist_data + idx * TRACE_HIST_BINS, hist, TRACE_HIST_BINS * sizeof(uint32_t));
+        app->trace_hist_min[idx] = hist_min;
+        app->trace_hist_max[idx] = hist_max;
+    } else {
+        memset(app->trace_hist_data + idx * TRACE_HIST_BINS, 0, TRACE_HIST_BINS * sizeof(uint32_t));
+        app->trace_hist_min[idx] = 0;
+        app->trace_hist_max[idx] = 1;
+    }
 
     app->trace_head = (app->trace_head + 1) % TRACE_MAX_SAMPLES;
     if (app->trace_count < TRACE_MAX_SAMPLES) app->trace_count++;
@@ -1199,6 +1217,67 @@ draw_trace_func (GtkDrawingArea *area,
     if (pad == 0) pad = 1.0;
     min_y -= pad;
     max_y += pad;
+
+    // Draw Heatmap
+    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_RGB24, width, height);
+    uint32_t *pixels = (uint32_t*)cairo_image_surface_get_data(surf);
+    int stride = cairo_image_surface_get_stride(surf) / 4;
+
+    // Clear surface
+    memset(pixels, 0, height * stride * 4);
+
+    double time_scale = width / app->trace_duration;
+    double t_start_disp = t_end - app->trace_duration;
+
+    // Iterate visible samples
+    for (int i = 0; i < visible_count; ++i) {
+        int idx = (start_idx + i) % TRACE_MAX_SAMPLES;
+        double t = app->trace_time[idx];
+        int x = (int)((t - t_start_disp) * time_scale);
+
+        if (x < 0 || x >= width) continue;
+
+        double h_min = app->trace_hist_min[idx];
+        double h_max = app->trace_hist_max[idx];
+        double h_range = h_max - h_min;
+        if (h_range <= 0) h_range = 1.0;
+
+        uint32_t *hist = app->trace_hist_data + idx * TRACE_HIST_BINS;
+
+        // Find max count in this column for normalization (optional, local contrast)
+        // Or global? Local makes more sense for waterfall visibility.
+        uint32_t col_max = 0;
+        for (int b=0; b<TRACE_HIST_BINS; b++) if (hist[b] > col_max) col_max = hist[b];
+        if (col_max == 0) col_max = 1;
+
+        // Draw column
+        for (int y = 0; y < height; ++y) {
+            // Map Y to Value
+            double val = max_y - (double)y / height * (max_y - min_y);
+
+            // Map Value to Bin
+            int bin = (int)((val - h_min) / h_range * (TRACE_HIST_BINS - 1));
+
+            if (bin >= 0 && bin < TRACE_HIST_BINS) {
+                uint32_t c = hist[bin];
+                if (c > 0) {
+                    double brightness = log10(c + 1) / log10(col_max + 1);
+                    uint8_t v = (uint8_t)(brightness * 255.0);
+                    // Grey scale: R=G=B=v
+                    pixels[y * stride + x] = (255 << 24) | (v << 16) | (v << 8) | v;
+                }
+            }
+        }
+
+        // Fill gaps if x steps > 1? Simple nearest/points for now.
+        // If trace is slow, x might jump. We can just draw points.
+        // Or draw rectangles if x range is calculated.
+        // Assuming high FPS, 1px width is fine.
+    }
+
+    cairo_set_source_surface(cr, surf, 0, 0);
+    cairo_paint(cr);
+    cairo_surface_destroy(surf);
 
     // Draw Lines
     #define MAP_X(t) ((t - (t_end - app->trace_duration)) / app->trace_duration * width)
@@ -1728,16 +1807,18 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
         }
     }
 
-    // Calculate Histogram if enabled
+    // Calculate Histogram if enabled OR if trace is active (for heatmap)
     gboolean show_hist = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_histogram));
-    if (show_hist) {
-        if (!app->hist_data) {
-            app->hist_bins = 256;
-            app->hist_data = (guint32*)calloc(app->hist_bins, sizeof(guint32));
-        } else {
-            memset(app->hist_data, 0, app->hist_bins * sizeof(guint32));
-        }
+    gboolean trace_active = app->trace_active;
 
+    // Ensure hist data allocation if needed
+    if ((show_hist || trace_active) && !app->hist_data) {
+        app->hist_bins = 256; // Fixed for now
+        app->hist_data = (guint32*)calloc(app->hist_bins, sizeof(guint32));
+    }
+
+    if (show_hist || trace_active) {
+        memset(app->hist_data, 0, app->hist_bins * sizeof(guint32));
         app->hist_max_count = 0;
 
         // Use Global Display Range for Histogram
@@ -1756,7 +1837,7 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
             app->hist_data[bin]++;
             if (app->hist_data[bin] > app->hist_max_count) app->hist_max_count = app->hist_data[bin];
         }
-        gtk_widget_queue_draw(app->histogram_area);
+        if (show_hist) gtk_widget_queue_draw(app->histogram_area);
     }
 
     double mean = sum / count;
@@ -1791,7 +1872,8 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
     snprintf(buf, sizeof(buf), "%.4g", p09);
     gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_p09), buf);
 
-    update_trace_data(app, min_v, max_v, mean, median, p01, p09);
+    update_trace_data(app, min_v, max_v, mean, median, p01, p09,
+                      app->hist_data, app->current_min, app->current_max);
 
     // New Stats
     snprintf(buf, sizeof(buf), "%zu", count);
@@ -2519,7 +2601,7 @@ activate (GtkApplication *app,
 
     // Trace Area
     viewer->trace_area = gtk_drawing_area_new();
-    gtk_widget_set_size_request(viewer->trace_area, 150, 150);
+    gtk_widget_set_size_request(viewer->trace_area, 150, 300);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->trace_area), draw_trace_func, viewer, NULL);
     gtk_widget_set_visible(viewer->trace_area, FALSE); // Hidden by default
     gtk_box_append(GTK_BOX(viewer->box_stats), viewer->trace_area);
@@ -2589,6 +2671,11 @@ main (int    argc,
     viewer.trace_median = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
     viewer.trace_p01 = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
     viewer.trace_p09 = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+
+    viewer.trace_hist_data = (uint32_t*)calloc(TRACE_MAX_SAMPLES * TRACE_HIST_BINS, sizeof(uint32_t));
+    viewer.trace_hist_min = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+    viewer.trace_hist_max = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+
     viewer.trace_duration = 60.0; // Default 60s
 
     app = gtk_application_new ("org.milk.shmimview", G_APPLICATION_NON_UNIQUE);
@@ -2611,6 +2698,10 @@ main (int    argc,
     if (viewer.trace_median) free(viewer.trace_median);
     if (viewer.trace_p01) free(viewer.trace_p01);
     if (viewer.trace_p09) free(viewer.trace_p09);
+
+    if (viewer.trace_hist_data) free(viewer.trace_hist_data);
+    if (viewer.trace_hist_min) free(viewer.trace_hist_min);
+    if (viewer.trace_hist_max) free(viewer.trace_hist_max);
 
     return status;
 }

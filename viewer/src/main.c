@@ -200,15 +200,25 @@ typedef struct {
     GtkWidget *lbl_pixel_info_main;
     GtkWidget *lbl_pixel_info_roi;
     GtkWidget *histogram_area;
-    gboolean hist_mouse_active;
-    double hist_mouse_x;
-    double hist_mouse_val;
+
+    // Unified Highlight State (Histogram & Colorbar)
+    gboolean highlight_active;
+    double highlight_val;
+    double highlight_mouse_x_hist; // Only for histogram overlay drawing
+    gboolean hist_mouse_active;    // True if mouse is specifically over histogram
 
     // Colorbar Cursor
     double colorbar_cursor_val;
     gboolean colorbar_cursor_active;
-    gboolean colorbar_mouse_active;
+    gboolean colorbar_mouse_active; // Specific for drawing the bar UI
     double colorbar_mouse_y;
+
+    // Auto Scale State
+    int last_min_mode;
+    int last_max_mode;
+    gboolean autoscale_source_roi;
+    GtkWidget *btn_autoscale;
+    GtkWidget *btn_autoscale_source;
 
     // Trace UI
     GtkWidget *check_trace;
@@ -274,7 +284,7 @@ static void update_zoom_layout(ViewerApp *app);
 static void get_image_screen_geometry(ViewerApp *app, double *offset_x, double *offset_y, double *scale);
 static void widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy);
 gboolean update_display (gpointer user_data);
-static void on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data);
+static void on_btn_autoscale_toggled (GtkToggleButton *btn, gpointer user_data);
 
 // Helper Functions for Color & Scale
 
@@ -525,8 +535,9 @@ on_motion_hist (GtkEventControllerMotion *controller,
                 gpointer                  user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
+    app->highlight_active = TRUE;
     app->hist_mouse_active = TRUE;
-    app->hist_mouse_x = x;
+    app->highlight_mouse_x_hist = x;
 
     // Calculate value from X
     int width = gtk_widget_get_width(app->histogram_area);
@@ -534,10 +545,11 @@ on_motion_hist (GtkEventControllerMotion *controller,
     int plot_w = width - margin_left;
     if (plot_w > 0) {
         double range = app->current_max - app->current_min;
-        app->hist_mouse_val = app->current_min + ((x - margin_left) / (double)plot_w) * range;
+        app->highlight_val = app->current_min + ((x - margin_left) / (double)plot_w) * range;
     }
 
     gtk_widget_queue_draw(app->histogram_area);
+    if (app->trace_area) gtk_widget_queue_draw(app->trace_area);
     app->force_redraw = TRUE; // Trigger image redraw to apply tint
 }
 
@@ -546,9 +558,11 @@ on_leave_hist (GtkEventControllerMotion *controller,
                gpointer                  user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
+    app->highlight_active = FALSE;
     app->hist_mouse_active = FALSE;
     gtk_widget_queue_draw(app->histogram_area);
-    app->force_redraw = TRUE; // Trigger image redraw to remove tint
+    if (app->trace_area) gtk_widget_queue_draw(app->trace_area);
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -560,7 +574,23 @@ on_motion_colorbar (GtkEventControllerMotion *controller,
     ViewerApp *app = (ViewerApp *)user_data;
     app->colorbar_mouse_active = TRUE;
     app->colorbar_mouse_y = y;
+
+    // Set unified highlight
+    int height = gtk_widget_get_height(app->colorbar);
+    int margin_top = 20;
+    int margin_bottom = 20;
+    int bar_height = height - margin_top - margin_bottom;
+
+    if (bar_height > 0) {
+        double t = 1.0 - (y - margin_top) / (double)bar_height; // 0 at bottom, 1 at top
+        app->highlight_val = app->min_val + t * (app->max_val - app->min_val);
+        app->highlight_active = TRUE;
+    }
+
     gtk_widget_queue_draw(app->colorbar);
+    gtk_widget_queue_draw(app->histogram_area); // Update histogram tinting too
+    if (app->trace_area) gtk_widget_queue_draw(app->trace_area);
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -569,7 +599,11 @@ on_leave_colorbar (GtkEventControllerMotion *controller,
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->colorbar_mouse_active = FALSE;
+    app->highlight_active = FALSE;
     gtk_widget_queue_draw(app->colorbar);
+    gtk_widget_queue_draw(app->histogram_area);
+    if (app->trace_area) gtk_widget_queue_draw(app->trace_area);
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -688,6 +722,23 @@ on_min_mode_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_dat
     int mode = gtk_drop_down_get_selected(dropdown);
     app->fixed_min = (mode == AUTO_MANUAL);
     gtk_widget_set_sensitive(app->spin_min, app->fixed_min);
+
+    // Update Autoscale Toggle State
+    if (app->btn_autoscale) {
+        g_signal_handlers_block_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
+
+        gboolean is_auto = !app->fixed_min && !app->fixed_max;
+        gboolean is_manual = app->fixed_min && app->fixed_max;
+
+        // If transitioning from Manual to Auto (partially or fully), set Toggle ON
+        if (!app->fixed_min) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), TRUE);
+
+        // If user manually selects Manual for both, set Toggle OFF
+        if (is_manual) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), FALSE);
+
+        g_signal_handlers_unblock_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
+    }
+
     app->force_redraw = TRUE;
 }
 
@@ -698,6 +749,22 @@ on_max_mode_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_dat
     int mode = gtk_drop_down_get_selected(dropdown);
     app->fixed_max = (mode == AUTO_MAX_MANUAL);
     gtk_widget_set_sensitive(app->spin_max, app->fixed_max);
+
+    // Update Autoscale Toggle State
+    if (app->btn_autoscale) {
+        g_signal_handlers_block_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
+
+        gboolean is_manual = app->fixed_min && app->fixed_max;
+
+        // If transitioning from Manual to Auto (partially or fully), set Toggle ON
+        if (!app->fixed_max) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), TRUE);
+
+        // If user manually selects Manual for both, set Toggle OFF
+        if (is_manual) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), FALSE);
+
+        g_signal_handlers_unblock_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
+    }
+
     app->force_redraw = TRUE;
 }
 
@@ -717,6 +784,19 @@ on_spin_min_changed (GtkSpinButton *spin, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     app->min_val = gtk_spin_button_get_value(spin);
     update_spin_steps(app);
+
+    // Manual change implies Manual mode -> Autoscale OFF
+    if (app->btn_autoscale && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->btn_autoscale))) {
+        // Only if we are currently Auto.
+        // But wait, spin button is insensitive if Auto.
+        // So this callback only fires if Manual.
+        // However, if we forced Manual via Dropdown, the toggle is already OFF.
+        // So this is likely redundant but safe.
+         g_signal_handlers_block_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
+         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), FALSE);
+         g_signal_handlers_unblock_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
+    }
+
     app->force_redraw = TRUE;
 }
 
@@ -726,26 +806,81 @@ on_spin_max_changed (GtkSpinButton *spin, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     app->max_val = gtk_spin_button_get_value(spin);
     update_spin_steps(app);
+
+    if (app->btn_autoscale && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->btn_autoscale))) {
+         g_signal_handlers_block_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
+         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), FALSE);
+         g_signal_handlers_unblock_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
+    }
+
     app->force_redraw = TRUE;
 }
 
 static void
-on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data)
+on_btn_autoscale_toggled (GtkToggleButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
+    gboolean active = gtk_toggle_button_get_active(btn);
 
-    // Toggle between Manual and Auto (Default Data Min/Max)
-    gboolean is_auto = !app->fixed_min; // Current state
+    if (active) {
+        // Switch to Auto
+        // Restore last modes if valid (not manual), else default to DATA
+        int target_min = app->last_min_mode;
+        int target_max = app->last_max_mode;
 
-    if (is_auto) {
+        if (target_min == AUTO_MANUAL) target_min = AUTO_DATA;
+        if (target_max == AUTO_MAX_MANUAL) target_max = AUTO_MAX_DATA;
+
+        // Prevent signal recursion if needed, though dropdowns trigger redraw which is fine.
+        // We want to update dropdowns visually.
+        g_signal_handlers_block_by_func(app->dropdown_min_mode, on_min_mode_changed, app);
+        g_signal_handlers_block_by_func(app->dropdown_max_mode, on_max_mode_changed, app);
+
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_min_mode), target_min);
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_max_mode), target_max);
+
+        app->fixed_min = FALSE;
+        app->fixed_max = FALSE;
+        gtk_widget_set_sensitive(app->spin_min, FALSE);
+        gtk_widget_set_sensitive(app->spin_max, FALSE);
+
+        g_signal_handlers_unblock_by_func(app->dropdown_min_mode, on_min_mode_changed, app);
+        g_signal_handlers_unblock_by_func(app->dropdown_max_mode, on_max_mode_changed, app);
+
+    } else {
         // Switch to Manual
+        // Save current modes
+        int current_min = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_min_mode));
+        int current_max = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_max_mode));
+
+        if (current_min != AUTO_MANUAL) app->last_min_mode = current_min;
+        if (current_max != AUTO_MAX_MANUAL) app->last_max_mode = current_max;
+
+        g_signal_handlers_block_by_func(app->dropdown_min_mode, on_min_mode_changed, app);
+        g_signal_handlers_block_by_func(app->dropdown_max_mode, on_max_mode_changed, app);
+
         gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_min_mode), AUTO_MANUAL);
         gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_max_mode), AUTO_MAX_MANUAL);
-    } else {
-        // Switch to Auto (Data Min/Max)
-        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_min_mode), AUTO_DATA);
-        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_max_mode), AUTO_MAX_DATA);
+
+        app->fixed_min = TRUE;
+        app->fixed_max = TRUE;
+        gtk_widget_set_sensitive(app->spin_min, TRUE);
+        gtk_widget_set_sensitive(app->spin_max, TRUE);
+
+        g_signal_handlers_unblock_by_func(app->dropdown_min_mode, on_min_mode_changed, app);
+        g_signal_handlers_unblock_by_func(app->dropdown_max_mode, on_max_mode_changed, app);
     }
+
+    app->force_redraw = TRUE;
+}
+
+static void
+on_btn_autoscale_source_toggled (GtkToggleButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->autoscale_source_roi = gtk_toggle_button_get_active(btn);
+
+    gtk_button_set_label(GTK_BUTTON(btn), app->autoscale_source_roi ? "ROI" : "Full");
 
     app->force_redraw = TRUE;
 }
@@ -1204,9 +1339,9 @@ draw_histogram_func (GtkDrawingArea *area,
         cairo_rectangle(cr, margin_left + i * bin_width, plot_h - h, bin_width, h);
 
         // Color based on cursor position if active
-        if (app->hist_mouse_active) {
+        if (app->highlight_active) {
             double bin_center_val = app->current_min + (i + 0.5) / app->hist_bins * range;
-            if (bin_center_val < app->hist_mouse_val) {
+            if (bin_center_val < app->highlight_val) {
                 cairo_set_source_rgb(cr, 0.2, 0.2, 0.8); // Blueish
             } else {
                 cairo_set_source_rgb(cr, 0.8, 0.2, 0.2); // Reddish
@@ -1301,9 +1436,12 @@ draw_histogram_func (GtkDrawingArea *area,
         }
     }
 
-    // Overlay
-    if (app->hist_mouse_active && app->hist_mouse_x >= margin_left) {
-        int bin = (int)((app->hist_mouse_x - margin_left) / bin_width);
+    // Overlay (Only if mouse is actually ON histogram)
+    if (app->highlight_active && app->hist_mouse_active && app->highlight_mouse_x_hist >= margin_left) {
+        // hist_mouse_active check ensures we only draw the text box when mouse is over histogram,
+        // not when it's over colorbar
+
+        int bin = (int)((app->highlight_mouse_x_hist - margin_left) / bin_width);
         if (bin >= 0 && bin < app->hist_bins) {
             double bin_val = app->current_min + (double)bin / app->hist_bins * range;
             uint32_t count = app->hist_data[bin];
@@ -1487,9 +1625,27 @@ draw_trace_func (GtkDrawingArea *area,
                     uint32_t c = hist[bin];
                     if (c > 0) {
                         double brightness = log10(c + 1) / log10(col_max + 1);
-                        uint8_t v = (uint8_t)(brightness * 255.0);
-                        // Grey scale: R=G=B=v
-                        pixels[y * stride + x] = (255 << 24) | (v << 16) | (v << 8) | v;
+
+                        uint8_t br, bg, bb;
+                        if (app->highlight_active) {
+                            if (val < app->highlight_val) {
+                                // Blueish
+                                br = (uint8_t)(brightness * 50);
+                                bg = (uint8_t)(brightness * 50);
+                                bb = (uint8_t)(brightness * 255);
+                            } else {
+                                // Reddish
+                                br = (uint8_t)(brightness * 255);
+                                bg = (uint8_t)(brightness * 50);
+                                bb = (uint8_t)(brightness * 50);
+                            }
+                        } else {
+                            // Grey scale
+                            uint8_t v = (uint8_t)(brightness * 255.0);
+                            br = v; bg = v; bb = v;
+                        }
+
+                        pixels[y * stride + x] = (255 << 24) | (br << 16) | (bg << 8) | bb;
                     }
                 }
             }
@@ -1661,7 +1817,7 @@ draw_roi_area_func (GtkDrawingArea *area,
     }
 
     // Apply Tint if needed
-    if (app->hist_mouse_active) {
+    if (app->highlight_active) {
         // Get raw data source
         void *data_source = app->raw_buffer ? app->raw_buffer : (app->image ? app->image->array.raw : NULL);
         if (data_source) {
@@ -1692,7 +1848,7 @@ draw_roi_area_func (GtkDrawingArea *area,
                     uint8_t bg = (p >> 8) & 0xFF;
                     uint8_t bb = p & 0xFF;
 
-                    if (val < app->hist_mouse_val) {
+                    if (val < app->highlight_val) {
                         // Mix Blue
                         br = (uint8_t)(br * 0.7);
                         bg = (uint8_t)(bg * 0.7);
@@ -2085,31 +2241,20 @@ static int compare_doubles(const void *a, const void *b) {
     return (da > db) - (da < db);
 }
 
+// Refactored Helper for calculating limits from a buffer
 static void
-calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int width, int height, uint8_t datatype, void *raw_data) {
-    int mode_min = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_min_mode));
-    int mode_max = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_max_mode));
+calculate_limits_from_buffer(void *data, size_t count, int datatype,
+                             int mode_min, int mode_max,
+                             double *out_min, double *out_max) {
 
     if (mode_min == AUTO_MANUAL && mode_max == AUTO_MAX_MANUAL) return;
 
-    // We need global stats
-    // For performance, we can do a single pass to get Min/Max.
-    // If percentiles are needed, we need a histogram or partial sort.
-    // Given 100Hz, full sort of 256x256 is fast. For 4k, we might want histogram.
-    // Let's implement a histogram-based approach for robustness and speed on large images.
-    // First, find exact Min/Max to set histogram range.
-
     double g_min = 1e30, g_max = -1e30;
-    size_t count = (size_t)width * height;
-
-    // Sampling for very large images?
-    // Let's stick to full scan for accuracy, optimize later if needed.
-    // Actually, earth_stream is small.
 
     // Type-specific scan
     #define SCAN_MINMAX(type) \
         { \
-            type *ptr = (type*)raw_data; \
+            type *ptr = (type*)data; \
             for(size_t i=0; i<count; ++i) { \
                 double v = (double)ptr[i]; \
                 if(v < g_min) g_min = v; \
@@ -2131,23 +2276,25 @@ calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int
     if (g_min > g_max) { g_min = 0; g_max = 1; }
 
     // Set targets based on Min
-    if (mode_min == AUTO_DATA) *new_min = g_min;
+    if (mode_min == AUTO_DATA) *out_min = g_min;
 
     // Set targets based on Max
-    if (mode_max == AUTO_MAX_DATA) *new_max = g_max;
+    if (mode_max == AUTO_MAX_DATA) *out_max = g_max;
 
     // If percentiles needed
     gboolean need_hist = (mode_min > AUTO_DATA) || (mode_max > AUTO_MAX_DATA);
     if (need_hist) {
         // Build temporary histogram
         #define HIST_BINS 4096
-        uint32_t hist[HIST_BINS] = {0};
+        static uint32_t hist[HIST_BINS]; // static to avoid stack overflow, safe if single threaded drawing
+        memset(hist, 0, sizeof(hist));
+
         double range = g_max - g_min;
         if (range <= 0) range = 1.0;
 
         #define FILL_HIST(type) \
             { \
-                type *ptr = (type*)raw_data; \
+                type *ptr = (type*)data; \
                 for(size_t i=0; i<count; ++i) { \
                     int bin = (int)(((double)ptr[i] - g_min) / range * (HIST_BINS - 1)); \
                     if(bin < 0) bin = 0; if(bin >= HIST_BINS) bin = HIST_BINS-1; \
@@ -2166,7 +2313,6 @@ calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int
         }
 
         // Find percentiles from CDF
-        // Min targets: 1%, 2%, 5%, 10%
         double target_cdf = 0;
         if (mode_min == AUTO_P01) target_cdf = 0.01;
         else if (mode_min == AUTO_P02) target_cdf = 0.02;
@@ -2179,13 +2325,12 @@ calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int
             for (int i=0; i<HIST_BINS; ++i) {
                 cum += hist[i];
                 if (cum >= threshold) {
-                    *new_min = g_min + ((double)i / (HIST_BINS-1)) * range;
+                    *out_min = g_min + ((double)i / (HIST_BINS-1)) * range;
                     break;
                 }
             }
         }
 
-        // Max targets: 99%, 98%, 95%, 90%
         target_cdf = 0;
         if (mode_max == AUTO_MAX_P99) target_cdf = 0.99;
         else if (mode_max == AUTO_MAX_P98) target_cdf = 0.98;
@@ -2198,12 +2343,54 @@ calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int
             for (int i=0; i<HIST_BINS; ++i) {
                 cum += hist[i];
                 if (cum >= threshold) {
-                    *new_max = g_min + ((double)i / (HIST_BINS-1)) * range;
+                    *out_max = g_min + ((double)i / (HIST_BINS-1)) * range;
                     break;
                 }
             }
         }
     }
+}
+
+static void
+calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int width, int height, uint8_t datatype, void *raw_data) {
+    int mode_min = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_min_mode));
+    int mode_max = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_max_mode));
+
+    if (mode_min == AUTO_MANUAL && mode_max == AUTO_MAX_MANUAL) return;
+
+    if (app->autoscale_source_roi && app->selection_active) {
+        // Extract ROI data
+        int x1 = app->sel_x1; int x2 = app->sel_x2 + 1;
+        int y1 = app->sel_y1; int y2 = app->sel_y2 + 1;
+        if (x1 < 0) x1 = 0; if (y1 < 0) y1 = 0;
+        if (x2 > width) x2 = width; if (y2 > height) y2 = height;
+
+        int roi_w = x2 - x1; int roi_h = y2 - y1;
+
+        if (roi_w > 0 && roi_h > 0) {
+            size_t roi_count = roi_w * roi_h;
+            size_t type_size = ImageStreamIO_typesize(datatype);
+
+            // Allocate temp buffer for ROI contiguous block
+            // (Optimize: We could iterate directly in calculate_limits_from_buffer if we passed strides/ROI,
+            // but copy is simpler for now and likely fast enough for typical ROIs)
+            void *roi_buf = malloc(roi_count * type_size);
+            if (roi_buf) {
+                for(int y=0; y<roi_h; ++y) {
+                    void *src = (char*)raw_data + ((y1 + y) * width + x1) * type_size;
+                    void *dst = (char*)roi_buf + (y * roi_w) * type_size;
+                    memcpy(dst, src, roi_w * type_size);
+                }
+
+                calculate_limits_from_buffer(roi_buf, roi_count, datatype, mode_min, mode_max, new_min, new_max);
+                free(roi_buf);
+                return;
+            }
+        }
+    }
+
+    // Fallback to Full Frame
+    calculate_limits_from_buffer(raw_data, (size_t)width * height, datatype, mode_min, mode_max, new_min, new_max);
 }
 
 static void
@@ -2692,10 +2879,25 @@ activate (GtkApplication *app,
     // Auto Scale Button
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
-    btn_autoscale = gtk_button_new_with_label ("Auto Scale");
-    g_signal_connect (btn_autoscale, "clicked", G_CALLBACK (on_btn_autoscale_clicked), viewer);
+
+    btn_autoscale = gtk_toggle_button_new_with_label ("Auto Scale");
+    viewer->btn_autoscale = btn_autoscale;
+    g_signal_connect (btn_autoscale, "toggled", G_CALLBACK (on_btn_autoscale_toggled), viewer);
     gtk_widget_set_hexpand(btn_autoscale, TRUE);
     gtk_box_append (GTK_BOX (row), btn_autoscale);
+
+    // Add CSS for Auto Scale button (Red when active)
+    GtkCssProvider *provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(provider,
+        "togglebutton:checked { background: #aa0000; color: white; border-color: #550000; }", -1);
+    GtkStyleContext *context = gtk_widget_get_style_context(btn_autoscale);
+    gtk_style_context_add_provider(context, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_USER);
+
+    // Auto Scale Source Toggle
+    GtkWidget *btn_as_source = gtk_toggle_button_new_with_label("Full");
+    viewer->btn_autoscale_source = btn_as_source;
+    g_signal_connect(btn_as_source, "toggled", G_CALLBACK(on_btn_autoscale_source_toggled), viewer);
+    gtk_box_append(GTK_BOX(row), btn_as_source);
 
     // Min Control
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);

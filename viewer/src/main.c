@@ -174,6 +174,7 @@ typedef struct {
     GtkWidget *histogram_area;
     gboolean hist_mouse_active;
     double hist_mouse_x;
+    double hist_mouse_val;
 
     // Colorbar Cursor
     double colorbar_cursor_val;
@@ -468,6 +469,16 @@ on_motion_hist (GtkEventControllerMotion *controller,
     ViewerApp *app = (ViewerApp *)user_data;
     app->hist_mouse_active = TRUE;
     app->hist_mouse_x = x;
+
+    // Calculate value from X
+    int width = gtk_widget_get_width(app->histogram_area);
+    int margin_left = 40;
+    int plot_w = width - margin_left;
+    if (plot_w > 0) {
+        double range = app->current_max - app->current_min;
+        app->hist_mouse_val = app->current_min + ((x - margin_left) / (double)plot_w) * range;
+    }
+
     gtk_widget_queue_draw(app->histogram_area);
     app->force_redraw = TRUE; // Trigger image redraw to apply tint
 }
@@ -1058,7 +1069,7 @@ draw_histogram_func (GtkDrawingArea *area,
         // Color based on cursor position if active
         if (app->hist_mouse_active) {
             double bin_center_val = app->current_min + (i + 0.5) / app->hist_bins * range;
-            if (bin_center_val < app->hist_mouse_x) {
+            if (bin_center_val < app->hist_mouse_val) {
                 cairo_set_source_rgb(cr, 0.2, 0.2, 0.8); // Blueish
             } else {
                 cairo_set_source_rgb(cr, 0.8, 0.2, 0.2); // Reddish
@@ -1485,23 +1496,11 @@ draw_roi_area_func (GtkDrawingArea *area,
 
     if (roi_w <= 0 || roi_h <= 0) return;
 
-    int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, app->img_width);
-    cairo_surface_t *surface = cairo_image_surface_create_for_data(
-        app->display_buffer,
-        CAIRO_FORMAT_RGB24,
-        app->img_width,
-        app->img_height,
-        stride
-    );
-
     // We want to draw the sub-rectangle (sel_x1, sel_y1, roi_w, roi_h)
     // stretched to fit (0, 0, width, height)
 
     double scale_x = (double)width / roi_w;
     double scale_y = (double)height / roi_h;
-    // Typically expand to fill, but respect aspect ratio?
-    // "Expand... to the same display size as the main full image" usually implies filling the widget.
-    // Let's preserve aspect ratio to avoid distortion, centering it.
     double scale = (scale_x < scale_y) ? scale_x : scale_y;
 
     double draw_w = roi_w * scale;
@@ -1509,14 +1508,87 @@ draw_roi_area_func (GtkDrawingArea *area,
     double off_x = (width - draw_w) / 2.0;
     double off_y = (height - draw_h) / 2.0;
 
+    // Create local buffer for ROI to allow tinting without affecting main image
+    // Stride must be 4-byte aligned, simplest is width * 4 for RGB24
+    int roi_stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, roi_w);
+    guchar *roi_buffer = malloc(roi_stride * roi_h);
+    if (!roi_buffer) return;
+
+    int main_stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, app->img_width);
+
+    // Copy pixels
+    for (int y = 0; y < roi_h; y++) {
+        uint32_t *src_row = (uint32_t*)(app->display_buffer + (app->sel_y1 + y) * main_stride);
+        uint32_t *dst_row = (uint32_t*)(roi_buffer + y * roi_stride);
+        memcpy(dst_row, src_row + app->sel_x1, roi_w * 4);
+    }
+
+    // Apply Tint if needed
+    if (app->hist_mouse_active) {
+        // Get raw data source
+        void *data_source = app->raw_buffer ? app->raw_buffer : (app->image ? app->image->array.raw : NULL);
+        if (data_source) {
+            int main_width = app->img_width;
+
+            for (int y = 0; y < roi_h; y++) {
+                uint32_t *dst_row = (uint32_t*)(roi_buffer + y * roi_stride);
+                int raw_y = app->sel_y1 + y;
+
+                for (int x = 0; x < roi_w; x++) {
+                    int raw_x = app->sel_x1 + x;
+                    size_t idx = raw_y * main_width + raw_x;
+
+                    double val = 0;
+                    switch (app->image->md->datatype) {
+                        case _DATATYPE_FLOAT: val = ((float*)data_source)[idx]; break;
+                        case _DATATYPE_DOUBLE: val = ((double*)data_source)[idx]; break;
+                        case _DATATYPE_UINT8: val = ((uint8_t*)data_source)[idx]; break;
+                        case _DATATYPE_INT16: val = ((int16_t*)data_source)[idx]; break;
+                        case _DATATYPE_UINT16: val = ((uint16_t*)data_source)[idx]; break;
+                        case _DATATYPE_INT32: val = ((int32_t*)data_source)[idx]; break;
+                        case _DATATYPE_UINT32: val = ((uint32_t*)data_source)[idx]; break;
+                        default: val = 0; break;
+                    }
+
+                    uint32_t p = dst_row[x];
+                    uint8_t br = (p >> 16) & 0xFF;
+                    uint8_t bg = (p >> 8) & 0xFF;
+                    uint8_t bb = p & 0xFF;
+
+                    if (val < app->hist_mouse_val) {
+                        // Mix Blue
+                        br = (uint8_t)(br * 0.7);
+                        bg = (uint8_t)(bg * 0.7);
+                        bb = (uint8_t)(bb * 0.7 + 255.0 * 0.3);
+                    } else {
+                        // Mix Red
+                        br = (uint8_t)(br * 0.7 + 255.0 * 0.3);
+                        bg = (uint8_t)(bg * 0.7);
+                        bb = (uint8_t)(bb * 0.7);
+                    }
+
+                    dst_row[x] = (255 << 24) | (br << 16) | (bg << 8) | bb;
+                }
+            }
+        }
+    }
+
+    cairo_surface_t *surface = cairo_image_surface_create_for_data(
+        roi_buffer,
+        CAIRO_FORMAT_RGB24,
+        roi_w,
+        roi_h,
+        roi_stride
+    );
+
     // Clip to widget
     cairo_rectangle(cr, 0, 0, width, height);
     cairo_clip(cr);
 
     cairo_translate(cr, off_x, off_y);
     cairo_scale(cr, scale, scale);
-    cairo_translate(cr, -app->sel_x1, -app->sel_y1);
 
+    // Draw
     cairo_set_source_surface(cr, surface, 0, 0);
     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
     cairo_paint(cr);
@@ -1524,10 +1596,11 @@ draw_roi_area_func (GtkDrawingArea *area,
     // Draw red outline around the ROI content in the expanded view
     cairo_set_source_rgb(cr, 1, 0, 0);
     cairo_set_line_width(cr, 2.0 / scale); // Keep line width constant in screen pixels
-    cairo_rectangle(cr, app->sel_x1, app->sel_y1, roi_w, roi_h);
+    cairo_rectangle(cr, 0, 0, roi_w, roi_h);
     cairo_stroke(cr);
 
     cairo_surface_destroy(surface);
+    free(roi_buffer);
 }
 
 // Drawing function for Image Area (Nearest Neighbor)
@@ -2143,21 +2216,6 @@ draw_image (ViewerApp *app)
             uint8_t br = (uint8_t)(r * 255.0);
             uint8_t bg = (uint8_t)(g * 255.0);
             uint8_t bb = (uint8_t)(b * 255.0);
-
-            // Apply overlay from histogram cursor
-            if (app->hist_mouse_active) {
-                if (val < app->hist_mouse_x) {
-                    // Mix Blue (0, 0, 1) at 30%
-                    br = (uint8_t)(br * 0.7);
-                    bg = (uint8_t)(bg * 0.7);
-                    bb = (uint8_t)(bb * 0.7 + 255.0 * 0.3);
-                } else {
-                    // Mix Red (1, 0, 0) at 30%
-                    br = (uint8_t)(br * 0.7 + 255.0 * 0.3);
-                    bg = (uint8_t)(bg * 0.7);
-                    bb = (uint8_t)(bb * 0.7);
-                }
-            }
 
             row[x] = (255 << 24) | (br << 16) | (bg << 8) | bb;
         }

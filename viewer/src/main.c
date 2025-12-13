@@ -31,10 +31,31 @@ enum {
     SCALE_COUNT
 };
 
+enum {
+    AUTO_MANUAL = 0,
+    AUTO_DATA,
+    AUTO_P01,
+    AUTO_P02,
+    AUTO_P05,
+    AUTO_P10,
+    AUTO_COUNT
+};
+
+enum {
+    AUTO_MAX_MANUAL = 0,
+    AUTO_MAX_DATA,
+    AUTO_MAX_P99,
+    AUTO_MAX_P98,
+    AUTO_MAX_P95,
+    AUTO_MAX_P90,
+    AUTO_MAX_COUNT
+};
+
 // Application state
 typedef struct {
     IMAGE *image;
     GtkWidget *image_area; // Replaces picture
+    GtkWidget *scrolled_main; // Main Image Scrolled Window
     GtkWidget *colorbar;
     GtkWidget *selection_area;
     char *image_name;
@@ -95,6 +116,13 @@ typedef struct {
     double contrast_start_x;
     double contrast_start_y;
 
+    // Pan State (Right Click Drag)
+    gboolean is_panning;
+    double pan_start_x;
+    double pan_start_y;
+    double pan_start_hadj;
+    double pan_start_vadj;
+
     // Selected region in image coordinates (pixels)
     int sel_x1, sel_y1, sel_x2, sel_y2;
     int sel_orig_x1, sel_orig_y1, sel_orig_x2, sel_orig_y2;
@@ -137,9 +165,9 @@ typedef struct {
     GtkWidget *dropdown_scale;
 
     GtkWidget *spin_min;
-    GtkWidget *check_min_auto;
+    GtkWidget *dropdown_min_mode;
     GtkWidget *spin_max;
-    GtkWidget *check_max_auto;
+    GtkWidget *dropdown_max_mode;
 
     GtkWidget *btn_fit_window;
     GtkWidget *dropdown_zoom;
@@ -318,22 +346,42 @@ static void get_colormap_color(double t, int type, double *r, double *g, double 
             }
             break;
         case COLORMAP_COOL:
-            // Cyan -> Magenta
-            *r = t;
-            *g = 1.0 - t;
-            *b = 1.0;
+            // Black -> Cyan -> Magenta
+            if (t < 0.5) {
+                // Black to Cyan
+                *r = 0;
+                *g = t * 2.0;
+                *b = t * 2.0;
+            } else {
+                // Cyan to Magenta
+                double x = (t - 0.5) * 2.0;
+                *r = x;
+                *g = 1.0 - x;
+                *b = 1.0;
+            }
             break;
         case COLORMAP_RAINBOW:
-            // Simple HSV walk
-            {
+            // Black -> Blue -> Cyan -> Green -> Yellow -> Red
+            // 5 segments
+            if (t == 0) { *r=0; *g=0; *b=0; }
+            else {
                 double h = (1.0 - t) * 240.0; // Blue to Red
                 double x = 1.0 - fabs(fmod(h / 60.0, 2) - 1.0);
-                if (h < 60) { *r=1; *g=x; *b=0; }
-                else if (h < 120) { *r=x; *g=1; *b=0; }
-                else if (h < 180) { *r=0; *g=1; *b=x; }
-                else if (h < 240) { *r=0; *g=x; *b=1; }
-                else if (h < 300) { *r=x; *g=0; *b=1; }
-                else { *r=1; *g=0; *b=x; }
+                // Darken low values
+                double scale = 1.0;
+                if (t < 0.1) scale = t * 10.0;
+
+                double tr, tg, tb;
+                if (h < 60) { tr=1; tg=x; tb=0; }
+                else if (h < 120) { tr=x; tg=1; tb=0; }
+                else if (h < 180) { tr=0; tg=1; tb=x; }
+                else if (h < 240) { tr=0; tg=x; tb=1; }
+                else if (h < 300) { tr=x; tg=0; tb=1; }
+                else { tr=1; tg=0; tb=x; }
+
+                *r = tr * scale;
+                *g = tg * scale;
+                *b = tb * scale;
             }
             break;
         case COLORMAP_A:
@@ -345,11 +393,19 @@ static void get_colormap_color(double t, int type, double *r, double *g, double 
             else { *r = 1; *g = (t-0.5)*2; *b = (t-0.5)*2; }
             break;
         case COLORMAP_B:
-            // DS9 "B": Inverse Heat-ish?
-            // Let's do Yellow -> Blue
-            *r = 1.0 - t;
-            *g = 1.0 - t;
-            *b = t;
+            // DS9 "B": Black -> Yellow -> Blue
+            if (t < 0.5) {
+                // Black -> Yellow
+                *r = t * 2.0;
+                *g = t * 2.0;
+                *b = 0;
+            } else {
+                // Yellow -> Blue
+                double x = (t - 0.5) * 2.0;
+                *r = 1.0 - x;
+                *g = 1.0 - x;
+                *b = x;
+            }
             break;
         default:
             *r = t; *g = t; *b = t;
@@ -407,7 +463,7 @@ update_pixel_info(ViewerApp *app, GtkWidget *label, double x, double y, gboolean
         }
 
         char buf[64];
-        snprintf(buf, sizeof(buf), "(%d, %d) = %.4g", ix, iy, val);
+        snprintf(buf, sizeof(buf), "X: %d Y: %d\nVal: %.4g", ix, iy, val);
         gtk_label_set_text(GTK_LABEL(label), buf);
         gtk_widget_set_visible(label, TRUE);
 
@@ -603,22 +659,22 @@ on_hist_scale_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_d
 }
 
 static void
-on_auto_min_toggled (GtkCheckButton *btn, gpointer user_data)
+on_min_mode_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    gboolean is_auto = gtk_check_button_get_active(btn);
-    app->fixed_min = !is_auto;
-    gtk_widget_set_sensitive(app->spin_min, !is_auto);
+    int mode = gtk_drop_down_get_selected(dropdown);
+    app->fixed_min = (mode == AUTO_MANUAL);
+    gtk_widget_set_sensitive(app->spin_min, app->fixed_min);
     app->force_redraw = TRUE;
 }
 
 static void
-on_auto_max_toggled (GtkCheckButton *btn, gpointer user_data)
+on_max_mode_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    gboolean is_auto = gtk_check_button_get_active(btn);
-    app->fixed_max = !is_auto;
-    gtk_widget_set_sensitive(app->spin_max, !is_auto);
+    int mode = gtk_drop_down_get_selected(dropdown);
+    app->fixed_max = (mode == AUTO_MAX_MANUAL);
+    gtk_widget_set_sensitive(app->spin_max, app->fixed_max);
     app->force_redraw = TRUE;
 }
 
@@ -655,18 +711,18 @@ on_btn_autoscale_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
 
-    gboolean min_auto = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_min_auto));
-    gboolean max_auto = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_max_auto));
+    // Toggle between Manual and Auto (Default Data Min/Max)
+    gboolean is_auto = !app->fixed_min; // Current state
 
-    gboolean new_state;
-    if (min_auto && max_auto) {
-        new_state = FALSE; // Turn OFF auto
+    if (is_auto) {
+        // Switch to Manual
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_min_mode), AUTO_MANUAL);
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_max_mode), AUTO_MAX_MANUAL);
     } else {
-        new_state = TRUE;  // Turn ON auto
+        // Switch to Auto (Data Min/Max)
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_min_mode), AUTO_DATA);
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_max_mode), AUTO_MAX_DATA);
     }
-
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_min_auto), new_state);
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->check_max_auto), new_state);
 
     app->force_redraw = TRUE;
 }
@@ -1196,7 +1252,7 @@ draw_histogram_func (GtkDrawingArea *area,
             cairo_fill(cr);
 
             // Increased Font Size
-            cairo_set_font_size(cr, 12);
+            cairo_set_font_size(cr, 14);
 
             cairo_set_source_rgb(cr, 1, 1, 1);
             cairo_move_to(cr, margin_left + 15, 25);
@@ -1730,11 +1786,33 @@ drag_begin (GtkGestureDrag *gesture,
     guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
 
     if (button == GDK_BUTTON_SECONDARY) { // Right Click
-        app->is_adjusting_contrast = TRUE;
-        app->contrast_start_x = x;
-        app->contrast_start_y = y;
-        app->contrast_start_cmap_min = app->cmap_min;
-        app->contrast_start_cmap_max = app->cmap_max;
+        GtkEventController *controller = GTK_EVENT_CONTROLLER(gesture);
+        GdkEvent *event = gtk_event_controller_get_current_event(controller);
+        GdkModifierType modifiers = gdk_event_get_modifier_state(event);
+
+        if (modifiers & GDK_CONTROL_MASK) {
+             // Contrast Adjustment
+            app->is_adjusting_contrast = TRUE;
+            app->contrast_start_x = x;
+            app->contrast_start_y = y;
+            app->contrast_start_cmap_min = app->cmap_min;
+            app->contrast_start_cmap_max = app->cmap_max;
+        } else {
+            // Pan
+            GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(app->scrolled_main));
+            GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(app->scrolled_main));
+
+            // Only pan if zoomed (scrollbars present/active)
+            if (gtk_adjustment_get_upper(hadj) > gtk_adjustment_get_page_size(hadj) ||
+                gtk_adjustment_get_upper(vadj) > gtk_adjustment_get_page_size(vadj)) {
+
+                app->is_panning = TRUE;
+                app->pan_start_x = x;
+                app->pan_start_y = y;
+                app->pan_start_hadj = gtk_adjustment_get_value(hadj);
+                app->pan_start_vadj = gtk_adjustment_get_value(vadj);
+            }
+        }
         return;
     }
 
@@ -1826,6 +1904,15 @@ drag_update (GtkGestureDrag *gesture,
         return;
     }
 
+    if (app->is_panning) {
+        GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(app->scrolled_main));
+        GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(app->scrolled_main));
+
+        gtk_adjustment_set_value(hadj, app->pan_start_hadj - offset_x);
+        gtk_adjustment_set_value(vadj, app->pan_start_vadj - offset_y);
+        return;
+    }
+
     if (app->is_moving_selection) {
         double off_x, off_y, scale;
         get_image_screen_geometry(app, &off_x, &off_y, &scale);
@@ -1873,6 +1960,11 @@ drag_end (GtkGestureDrag *gesture,
         return;
     }
 
+    if (app->is_panning) {
+        app->is_panning = FALSE;
+        return;
+    }
+
     if (app->is_moving_selection) {
         app->is_moving_selection = FALSE;
         app->selection_active = TRUE;
@@ -1914,6 +2006,127 @@ static int compare_doubles(const void *a, const void *b) {
     double da = *(const double *)a;
     double db = *(const double *)b;
     return (da > db) - (da < db);
+}
+
+static void
+calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int width, int height, uint8_t datatype, void *raw_data) {
+    int mode_min = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_min_mode));
+    int mode_max = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_max_mode));
+
+    if (mode_min == AUTO_MANUAL && mode_max == AUTO_MAX_MANUAL) return;
+
+    // We need global stats
+    // For performance, we can do a single pass to get Min/Max.
+    // If percentiles are needed, we need a histogram or partial sort.
+    // Given 100Hz, full sort of 256x256 is fast. For 4k, we might want histogram.
+    // Let's implement a histogram-based approach for robustness and speed on large images.
+    // First, find exact Min/Max to set histogram range.
+
+    double g_min = 1e30, g_max = -1e30;
+    size_t count = (size_t)width * height;
+
+    // Sampling for very large images?
+    // Let's stick to full scan for accuracy, optimize later if needed.
+    // Actually, earth_stream is small.
+
+    // Type-specific scan
+    #define SCAN_MINMAX(type) \
+        { \
+            type *ptr = (type*)raw_data; \
+            for(size_t i=0; i<count; ++i) { \
+                double v = (double)ptr[i]; \
+                if(v < g_min) g_min = v; \
+                if(v > g_max) g_max = v; \
+            } \
+        }
+
+    switch(datatype) {
+        case _DATATYPE_FLOAT: SCAN_MINMAX(float); break;
+        case _DATATYPE_DOUBLE: SCAN_MINMAX(double); break;
+        case _DATATYPE_UINT8: SCAN_MINMAX(uint8_t); break;
+        case _DATATYPE_INT16: SCAN_MINMAX(int16_t); break;
+        case _DATATYPE_UINT16: SCAN_MINMAX(uint16_t); break;
+        case _DATATYPE_INT32: SCAN_MINMAX(int32_t); break;
+        case _DATATYPE_UINT32: SCAN_MINMAX(uint32_t); break;
+        default: return;
+    }
+
+    if (g_min > g_max) { g_min = 0; g_max = 1; }
+
+    // Set targets based on Min
+    if (mode_min == AUTO_DATA) *new_min = g_min;
+
+    // Set targets based on Max
+    if (mode_max == AUTO_MAX_DATA) *new_max = g_max;
+
+    // If percentiles needed
+    gboolean need_hist = (mode_min > AUTO_DATA) || (mode_max > AUTO_MAX_DATA);
+    if (need_hist) {
+        // Build temporary histogram
+        #define HIST_BINS 4096
+        uint32_t hist[HIST_BINS] = {0};
+        double range = g_max - g_min;
+        if (range <= 0) range = 1.0;
+
+        #define FILL_HIST(type) \
+            { \
+                type *ptr = (type*)raw_data; \
+                for(size_t i=0; i<count; ++i) { \
+                    int bin = (int)(((double)ptr[i] - g_min) / range * (HIST_BINS - 1)); \
+                    if(bin < 0) bin = 0; if(bin >= HIST_BINS) bin = HIST_BINS-1; \
+                    hist[bin]++; \
+                } \
+            }
+
+        switch(datatype) {
+            case _DATATYPE_FLOAT: FILL_HIST(float); break;
+            case _DATATYPE_DOUBLE: FILL_HIST(double); break;
+            case _DATATYPE_UINT8: FILL_HIST(uint8_t); break;
+            case _DATATYPE_INT16: FILL_HIST(int16_t); break;
+            case _DATATYPE_UINT16: FILL_HIST(uint16_t); break;
+            case _DATATYPE_INT32: FILL_HIST(int32_t); break;
+            case _DATATYPE_UINT32: FILL_HIST(uint32_t); break;
+        }
+
+        // Find percentiles from CDF
+        // Min targets: 1%, 2%, 5%, 10%
+        double target_cdf = 0;
+        if (mode_min == AUTO_P01) target_cdf = 0.01;
+        else if (mode_min == AUTO_P02) target_cdf = 0.02;
+        else if (mode_min == AUTO_P05) target_cdf = 0.05;
+        else if (mode_min == AUTO_P10) target_cdf = 0.10;
+
+        if (target_cdf > 0) {
+            double threshold = count * target_cdf;
+            double cum = 0;
+            for (int i=0; i<HIST_BINS; ++i) {
+                cum += hist[i];
+                if (cum >= threshold) {
+                    *new_min = g_min + ((double)i / (HIST_BINS-1)) * range;
+                    break;
+                }
+            }
+        }
+
+        // Max targets: 99%, 98%, 95%, 90%
+        target_cdf = 0;
+        if (mode_max == AUTO_MAX_P99) target_cdf = 0.99;
+        else if (mode_max == AUTO_MAX_P98) target_cdf = 0.98;
+        else if (mode_max == AUTO_MAX_P95) target_cdf = 0.95;
+        else if (mode_max == AUTO_MAX_P90) target_cdf = 0.90;
+
+        if (target_cdf > 0) {
+            double threshold = count * target_cdf;
+            double cum = 0;
+            for (int i=0; i<HIST_BINS; ++i) {
+                cum += hist[i];
+                if (cum >= threshold) {
+                    *new_max = g_min + ((double)i / (HIST_BINS-1)) * range;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 static void
@@ -2109,54 +2322,19 @@ draw_image (ViewerApp *app)
 
     guchar *pixels = app->display_buffer;
 
-    double min_val = 1e30;
-    double max_val = -1e30;
+    double min_val = app->min_val;
+    double max_val = app->max_val;
 
-    gboolean need_scan = (!app->fixed_min || !app->fixed_max);
-
-    if (need_scan) {
-        int x_start = 0, y_start = 0;
-        int x_end = width, y_end = height;
-
-        if (app->selection_active) {
-            x_start = app->sel_x1;
-            x_end = app->sel_x2 + 1;
-            y_start = app->sel_y1;
-            y_end = app->sel_y2 + 1;
-            if (x_start < 0) x_start = 0;
-            if (y_start < 0) y_start = 0;
-            if (x_end > width) x_end = width;
-            if (y_end > height) y_end = height;
-        }
-
-        for (int y = y_start; y < y_end; y++) {
-            for (int x = x_start; x < x_end; x++) {
-                int i = y * width + x;
-                double val = 0;
-                switch (datatype) {
-                    case _DATATYPE_FLOAT: val = ((float*)raw_data)[i]; break;
-                    case _DATATYPE_DOUBLE: val = ((double*)raw_data)[i]; break;
-                    case _DATATYPE_UINT8: val = ((uint8_t*)raw_data)[i]; break;
-                    case _DATATYPE_INT16: val = ((int16_t*)raw_data)[i]; break;
-                    case _DATATYPE_UINT16: val = ((uint16_t*)raw_data)[i]; break;
-                    case _DATATYPE_INT32: val = ((int32_t*)raw_data)[i]; break;
-                    case _DATATYPE_UINT32: val = ((uint32_t*)raw_data)[i]; break;
-                    default: val = 0; break;
-                }
-
-                if (val < min_val) min_val = val;
-                if (val > max_val) max_val = val;
-            }
-        }
-
-        if (min_val > max_val) {
-            min_val = 0;
-            max_val = 1;
-        }
+    // Calculate Autoscale if needed
+    if (!app->fixed_min || !app->fixed_max) {
+        calculate_autoscale_limits(app, &min_val, &max_val, width, height, datatype, raw_data);
     }
 
     if (app->fixed_min) min_val = app->min_val;
+    else app->min_val = min_val; // Update internal state for UI consistency?
+
     if (app->fixed_max) max_val = app->max_val;
+    else app->max_val = max_val;
 
     if (max_val == min_val) max_val = min_val + 1.0;
 
@@ -2434,25 +2612,18 @@ activate (GtkApplication *app,
     g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
     gtk_box_append (GTK_BOX (row), btn_reset);
 
-    // Auto Scale Row
+    // Auto Scale Button
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
-
     btn_autoscale = gtk_button_new_with_label ("Auto Scale");
     g_signal_connect (btn_autoscale, "clicked", G_CALLBACK (on_btn_autoscale_clicked), viewer);
+    gtk_widget_set_hexpand(btn_autoscale, TRUE);
     gtk_box_append (GTK_BOX (row), btn_autoscale);
 
-    viewer->check_min_auto = gtk_check_button_new_with_label ("Min");
-    g_signal_connect (viewer->check_min_auto, "toggled", G_CALLBACK (on_auto_min_toggled), viewer);
-    gtk_box_append (GTK_BOX (row), viewer->check_min_auto);
-
-    viewer->check_max_auto = gtk_check_button_new_with_label ("Max");
-    g_signal_connect (viewer->check_max_auto, "toggled", G_CALLBACK (on_auto_max_toggled), viewer);
-    gtk_box_append (GTK_BOX (row), viewer->check_max_auto);
-
-    // Manual Levels Row
+    // Min Control
     row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+    gtk_box_append(GTK_BOX(row), gtk_label_new("Min"));
 
     viewer->spin_min = gtk_spin_button_new_with_range (-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits (GTK_SPIN_BUTTON (viewer->spin_min), 2);
@@ -2460,11 +2631,26 @@ activate (GtkApplication *app,
     g_signal_connect (viewer->spin_min, "value-changed", G_CALLBACK (on_spin_min_changed), viewer);
     gtk_box_append (GTK_BOX (row), viewer->spin_min);
 
+    const char *min_modes[] = {"Manual", "Min Val", "1%", "2%", "5%", "10%", NULL};
+    viewer->dropdown_min_mode = gtk_drop_down_new_from_strings(min_modes);
+    g_signal_connect(viewer->dropdown_min_mode, "notify::selected", G_CALLBACK(on_min_mode_changed), viewer);
+    gtk_box_append(GTK_BOX(row), viewer->dropdown_min_mode);
+
+    // Max Control
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+    gtk_box_append(GTK_BOX(row), gtk_label_new("Max"));
+
     viewer->spin_max = gtk_spin_button_new_with_range (-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits (GTK_SPIN_BUTTON (viewer->spin_max), 2);
     gtk_widget_set_hexpand(viewer->spin_max, TRUE);
     g_signal_connect (viewer->spin_max, "value-changed", G_CALLBACK (on_spin_max_changed), viewer);
     gtk_box_append (GTK_BOX (row), viewer->spin_max);
+
+    const char *max_modes[] = {"Manual", "Max Val", "99%", "98%", "95%", "90%", NULL};
+    viewer->dropdown_max_mode = gtk_drop_down_new_from_strings(max_modes);
+    g_signal_connect(viewer->dropdown_max_mode, "notify::selected", G_CALLBACK(on_max_mode_changed), viewer);
+    gtk_box_append(GTK_BOX(row), viewer->dropdown_max_mode);
 
     // Middle Paned (Images vs Right Panel)
     GtkWidget *paned_mid = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
@@ -2481,20 +2667,20 @@ activate (GtkApplication *app,
     gtk_paned_set_position(GTK_PANED(viewer->paned_images), 400);
 
     // Main Image
-    scrolled_window = gtk_scrolled_window_new ();
-    gtk_widget_set_vexpand (scrolled_window, TRUE);
-    gtk_widget_set_hexpand (scrolled_window, TRUE);
+    viewer->scrolled_main = gtk_scrolled_window_new ();
+    gtk_widget_set_vexpand (viewer->scrolled_main, TRUE);
+    gtk_widget_set_hexpand (viewer->scrolled_main, TRUE);
 
-    gtk_paned_set_start_child(GTK_PANED(viewer->paned_images), scrolled_window);
+    gtk_paned_set_start_child(GTK_PANED(viewer->paned_images), viewer->scrolled_main);
     gtk_paned_set_resize_start_child(GTK_PANED(viewer->paned_images), TRUE);
     gtk_paned_set_shrink_start_child(GTK_PANED(viewer->paned_images), TRUE);
 
     scroll_controller = gtk_event_controller_scroll_new (GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
     g_signal_connect (scroll_controller, "scroll", G_CALLBACK (on_scroll), viewer);
-    gtk_widget_add_controller (scrolled_window, scroll_controller);
+    gtk_widget_add_controller (viewer->scrolled_main, scroll_controller);
 
     overlay = gtk_overlay_new();
-    gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scrolled_window), overlay);
+    gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (viewer->scrolled_main), overlay);
 
     // ROI Image (Hidden by default)
     viewer->scrolled_roi = gtk_scrolled_window_new();
@@ -2541,9 +2727,9 @@ activate (GtkApplication *app,
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->selection_area);
 
     viewer->lbl_pixel_info_main = gtk_label_new("");
-    gtk_widget_set_halign(viewer->lbl_pixel_info_main, GTK_ALIGN_END);
+    gtk_widget_set_halign(viewer->lbl_pixel_info_main, GTK_ALIGN_START);
     gtk_widget_set_valign(viewer->lbl_pixel_info_main, GTK_ALIGN_END);
-    gtk_widget_set_margin_end(viewer->lbl_pixel_info_main, 5);
+    gtk_widget_set_margin_start(viewer->lbl_pixel_info_main, 5);
     gtk_widget_set_margin_bottom(viewer->lbl_pixel_info_main, 5);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), viewer->lbl_pixel_info_main);
 
@@ -2851,8 +3037,12 @@ activate (GtkApplication *app,
 
 
     // Initialize UI State based on CLI args
-    gtk_check_button_set_active (GTK_CHECK_BUTTON (viewer->check_min_auto), !viewer->fixed_min);
-    gtk_check_button_set_active (GTK_CHECK_BUTTON (viewer->check_max_auto), !viewer->fixed_max);
+    // Set Dropdowns for Auto/Manual
+    if (viewer->fixed_min) gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_min_mode), AUTO_MANUAL);
+    else gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_min_mode), AUTO_DATA);
+
+    if (viewer->fixed_max) gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_max_mode), AUTO_MAX_MANUAL);
+    else gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_max_mode), AUTO_MAX_DATA);
 
     gtk_widget_set_sensitive (viewer->spin_min, viewer->fixed_min);
     gtk_widget_set_sensitive (viewer->spin_max, viewer->fixed_max);

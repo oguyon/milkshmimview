@@ -663,10 +663,21 @@ on_btn_expand_roi_toggled (GtkCheckButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     gboolean active = gtk_check_button_get_active(btn);
+
+    gtk_widget_set_visible(app->scrolled_roi, active);
+
     if (active) {
-        gtk_widget_set_visible(app->scrolled_roi, TRUE);
-    } else {
-        gtk_widget_set_visible(app->scrolled_roi, FALSE);
+        int w = gtk_widget_get_width(app->paned_images);
+        if (w > 0) {
+            int pos = gtk_paned_get_position(GTK_PANED(app->paned_images));
+            // If main image taking almost all space (pos near w) or no space (pos near 0)
+            // Default split to give ROI some space.
+            // pos refers to the size of the start child (Main Image).
+            if (pos < 50 || pos > w - 50) {
+                // Give half space
+                gtk_paned_set_position(GTK_PANED(app->paned_images), w / 2);
+            }
+        }
     }
 }
 

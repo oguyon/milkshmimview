@@ -3157,6 +3157,43 @@ activate (GtkApplication *app,
     g_signal_connect(viewer->dropdown_max_mode, "notify::selected", G_CALLBACK(on_max_mode_changed), viewer);
     gtk_box_append(GTK_BOX(row), viewer->dropdown_max_mode);
 
+    // Separator
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+
+    // Thresholds Control
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+
+    viewer->check_thresholds = gtk_check_button_new_with_label("Thresholds");
+    g_signal_connect(viewer->check_thresholds, "toggled", G_CALLBACK(on_threshold_toggled), viewer);
+    gtk_box_append(GTK_BOX(row), viewer->check_thresholds);
+
+    // Thresh Min
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+    gtk_box_append(GTK_BOX(row), gtk_label_new("T.Min"));
+
+    viewer->spin_thresh_min = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(viewer->spin_thresh_min), 2);
+    gtk_widget_set_hexpand(viewer->spin_thresh_min, TRUE);
+    gtk_widget_set_sensitive(viewer->spin_thresh_min, FALSE);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(viewer->spin_thresh_min), 0.0);
+    g_signal_connect(viewer->spin_thresh_min, "value-changed", G_CALLBACK(on_thresh_min_changed), viewer);
+    gtk_box_append(GTK_BOX(row), viewer->spin_thresh_min);
+
+    // Thresh Max
+    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+    gtk_box_append(GTK_BOX(row), gtk_label_new("T.Max"));
+
+    viewer->spin_thresh_max = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(viewer->spin_thresh_max), 2);
+    gtk_widget_set_hexpand(viewer->spin_thresh_max, TRUE);
+    gtk_widget_set_sensitive(viewer->spin_thresh_max, FALSE);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(viewer->spin_thresh_max), 1.0);
+    g_signal_connect(viewer->spin_thresh_max, "value-changed", G_CALLBACK(on_thresh_max_changed), viewer);
+    gtk_box_append(GTK_BOX(row), viewer->spin_thresh_max);
+
     // Middle Paned (Images vs Right Panel)
     GtkWidget *paned_mid = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_paned_set_end_child(GTK_PANED(paned_root), paned_mid);
@@ -3545,26 +3582,6 @@ activate (GtkApplication *app,
     g_signal_connect(btn_inc, "clicked", G_CALLBACK(on_trace_dur_increase), viewer);
     gtk_box_append(GTK_BOX(stat_row), btn_inc);
 
-    // Thresholds Control Row
-    stat_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->box_stats), stat_row);
-
-    viewer->check_thresholds = gtk_check_button_new_with_label("Thresh");
-    g_signal_connect(viewer->check_thresholds, "toggled", G_CALLBACK(on_threshold_toggled), viewer);
-    gtk_box_append(GTK_BOX(stat_row), viewer->check_thresholds);
-
-    viewer->spin_thresh_min = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
-    gtk_widget_set_size_request(viewer->spin_thresh_min, 60, -1);
-    gtk_widget_set_sensitive(viewer->spin_thresh_min, FALSE);
-    g_signal_connect(viewer->spin_thresh_min, "value-changed", G_CALLBACK(on_thresh_min_changed), viewer);
-    gtk_box_append(GTK_BOX(stat_row), viewer->spin_thresh_min);
-
-    viewer->spin_thresh_max = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
-    gtk_widget_set_size_request(viewer->spin_thresh_max, 60, -1);
-    gtk_widget_set_sensitive(viewer->spin_thresh_max, FALSE);
-    g_signal_connect(viewer->spin_thresh_max, "value-changed", G_CALLBACK(on_thresh_max_changed), viewer);
-    gtk_box_append(GTK_BOX(stat_row), viewer->spin_thresh_max);
-
     // Trace Area
     viewer->trace_area = gtk_drawing_area_new();
     gtk_widget_set_size_request(viewer->trace_area, 150, 300);
@@ -3595,6 +3612,10 @@ activate (GtkApplication *app,
     // Set initial colormap range
     viewer->cmap_min = 0.0;
     viewer->cmap_max = 1.0;
+
+    // Set Default Thresholds
+    viewer->thresh_min_val = 0.0;
+    viewer->thresh_max_val = 1.0;
 
     // Default 30ms = 33Hz
     viewer->timeout_id = g_timeout_add (30, update_display, viewer);

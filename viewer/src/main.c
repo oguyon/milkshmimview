@@ -740,10 +740,16 @@ on_min_mode_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_dat
         gboolean is_manual = app->fixed_min && app->fixed_max;
 
         // If transitioning from Manual to Auto (partially or fully), set Toggle ON
-        if (!app->fixed_min) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), TRUE);
+        if (!app->fixed_min) {
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), TRUE);
+            gtk_button_set_label(GTK_BUTTON(app->btn_autoscale), "Auto");
+        }
 
         // If user manually selects Manual for both, set Toggle OFF
-        if (is_manual) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), FALSE);
+        if (is_manual) {
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), FALSE);
+            gtk_button_set_label(GTK_BUTTON(app->btn_autoscale), "Manual");
+        }
 
         g_signal_handlers_unblock_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
     }
@@ -766,10 +772,16 @@ on_max_mode_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_dat
         gboolean is_manual = app->fixed_min && app->fixed_max;
 
         // If transitioning from Manual to Auto (partially or fully), set Toggle ON
-        if (!app->fixed_max) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), TRUE);
+        if (!app->fixed_max) {
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), TRUE);
+            gtk_button_set_label(GTK_BUTTON(app->btn_autoscale), "Auto");
+        }
 
         // If user manually selects Manual for both, set Toggle OFF
-        if (is_manual) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), FALSE);
+        if (is_manual) {
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), FALSE);
+            gtk_button_set_label(GTK_BUTTON(app->btn_autoscale), "Manual");
+        }
 
         g_signal_handlers_unblock_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
     }
@@ -803,19 +815,6 @@ on_spin_min_changed (GtkSpinButton *spin, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     app->min_val = gtk_spin_button_get_value(spin);
     update_spin_steps(app);
-
-    // Manual change implies Manual mode -> Autoscale OFF
-    if (app->btn_autoscale && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->btn_autoscale))) {
-        // Only if we are currently Auto.
-        // But wait, spin button is insensitive if Auto.
-        // So this callback only fires if Manual.
-        // However, if we forced Manual via Dropdown, the toggle is already OFF.
-        // So this is likely redundant but safe.
-         g_signal_handlers_block_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
-         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), FALSE);
-         g_signal_handlers_unblock_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
-    }
-
     app->force_redraw = TRUE;
 }
 
@@ -825,13 +824,6 @@ on_spin_max_changed (GtkSpinButton *spin, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     app->max_val = gtk_spin_button_get_value(spin);
     update_spin_steps(app);
-
-    if (app->btn_autoscale && gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app->btn_autoscale))) {
-         g_signal_handlers_block_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
-         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_autoscale), FALSE);
-         g_signal_handlers_unblock_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
-    }
-
     app->force_redraw = TRUE;
 }
 

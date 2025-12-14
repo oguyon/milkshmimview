@@ -787,6 +787,16 @@ static void update_spin_steps(ViewerApp *app) {
     gtk_spin_button_set_increments(GTK_SPIN_BUTTON(app->spin_max), step, step * 5.0);
 }
 
+static void update_thresh_spin_steps(ViewerApp *app) {
+    if (!app->spin_thresh_min || !app->spin_thresh_max) return;
+    double range = fabs(app->thresh_max_val - app->thresh_min_val);
+    double step = range * 0.1;
+    if (step < 1e-9) step = 0.1;
+
+    gtk_spin_button_set_increments(GTK_SPIN_BUTTON(app->spin_thresh_min), step, step * 10.0);
+    gtk_spin_button_set_increments(GTK_SPIN_BUTTON(app->spin_thresh_max), step, step * 10.0);
+}
+
 static void
 on_spin_min_changed (GtkSpinButton *spin, gpointer user_data)
 {
@@ -1962,6 +1972,7 @@ on_thresh_min_changed (GtkSpinButton *spin, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->thresh_min_val = gtk_spin_button_get_value(spin);
+    update_thresh_spin_steps(app);
     app->force_redraw = TRUE;
 }
 
@@ -1970,6 +1981,7 @@ on_thresh_max_changed (GtkSpinButton *spin, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->thresh_max_val = gtk_spin_button_get_value(spin);
+    update_thresh_spin_steps(app);
     app->force_redraw = TRUE;
 }
 
@@ -3623,6 +3635,7 @@ activate (GtkApplication *app,
     viewer->timeout_id = g_timeout_add (30, update_display, viewer);
 
     update_spin_steps(viewer);
+    update_thresh_spin_steps(viewer);
 
     gtk_window_present (GTK_WINDOW (window));
 }

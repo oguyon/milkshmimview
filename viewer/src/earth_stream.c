@@ -93,6 +93,13 @@ int main(int argc, char **argv) {
     float rotation = 0.0f;
     float speed = 0.02f; // Rad per frame
 
+    // Period = 50 rotations
+    // 1 rotation = 2*PI
+    // Frames per rotation = 2*PI / speed
+    // Period in frames = 50 * (2*PI / speed)
+    float tilt_speed = (2.0f * M_PI) / (50.0f * (2.0f * M_PI / speed));
+    float tilt_phase = 0.0f;
+
     // Light direction (from top left front)
     float lx = -0.5f;
     float ly = -0.5f;
@@ -103,6 +110,11 @@ int main(int argc, char **argv) {
 
     while(1) {
         float *data = (float*)image.array.raw;
+
+        // Tilt between 0 and 90 degrees (0 to PI/2 radians)
+        // Sine wave: 45 + 45 * sin(phase) -> 0..90 deg
+        float tilt_deg = 45.0f + 45.0f * sin(tilt_phase);
+        float tilt_rad = tilt_deg * (M_PI / 180.0f);
 
         for (int y = 0; y < HEIGHT; y++) {
             for (int x = 0; x < WIDTH; x++) {
@@ -124,10 +136,19 @@ int main(int argc, char **argv) {
                     float dot = nx * lx + ny * ly + nz * lz;
                     if (dot < 0) dot = 0;
 
-                    // Texture coordinates (Rotate around Y)
-                    float px = nx * cos(rotation) - nz * sin(rotation);
-                    float py = ny;
-                    float pz = nx * sin(rotation) + nz * cos(rotation);
+                    // Texture coordinates
+
+                    // 1. Rotate for Tilt (Around X axis)
+                    // y' = y*cos(t) - z*sin(t)
+                    // z' = y*sin(t) + z*cos(t)
+                    float ny_t = ny * cos(tilt_rad) - nz * sin(tilt_rad);
+                    float nz_t = ny * sin(tilt_rad) + nz * cos(tilt_rad);
+                    float nx_t = nx;
+
+                    // 2. Rotate for Spin (Around Y axis)
+                    float px = nx_t * cos(rotation) - nz_t * sin(rotation);
+                    float py = ny_t;
+                    float pz = nx_t * sin(rotation) + nz_t * cos(rotation);
 
                     // Sample noise
                     float freq = 3.0f;
@@ -149,6 +170,7 @@ int main(int argc, char **argv) {
         ImageStreamIO_sempost(&image, -1);
 
         rotation += speed;
+        tilt_phase += tilt_speed;
         usleep(1000000 / FPS);
     }
 

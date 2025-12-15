@@ -2456,8 +2456,22 @@ drag_update (GtkGestureDrag *gesture,
         double off_x, off_y, scale;
         get_image_screen_geometry(app, &off_x, &off_y, &scale);
 
-        int idx = (int)(offset_x / scale);
-        int idy = (int)(offset_y / scale);
+        // Transform offset vector to image space (inverse rotate & flip)
+        double dx = offset_x / scale;
+        double dy = offset_y / scale;
+
+        // Inv Rotate
+        double angle = -app->rot_angle * (M_PI / 2.0);
+        double rdx = dx * cos(angle) - dy * sin(angle);
+        double rdy = dx * sin(angle) + dy * cos(angle);
+        dx = rdx; dy = rdy;
+
+        // Inv Flip
+        if (app->flip_x) dx = -dx;
+        if (app->flip_y) dy = -dy;
+
+        int idx = (int)dx;
+        int idy = (int)dy;
 
         int w = app->sel_orig_x2 - app->sel_orig_x1;
         int h = app->sel_orig_y2 - app->sel_orig_y1;

@@ -2062,15 +2062,6 @@ draw_roi_area_func (GtkDrawingArea *area,
     // We want to draw the sub-rectangle (sel_x1, sel_y1, roi_w, roi_h)
     // stretched to fit (0, 0, width, height)
 
-    double scale_x = (double)width / roi_w;
-    double scale_y = (double)height / roi_h;
-    double scale = (scale_x < scale_y) ? scale_x : scale_y;
-
-    double draw_w = roi_w * scale;
-    double draw_h = roi_h * scale;
-    double off_x = (width - draw_w) / 2.0;
-    double off_y = (height - draw_h) / 2.0;
-
     // Create local buffer for ROI to allow tinting without affecting main image
     // Stride must be 4-byte aligned, simplest is width * 4 for RGB24
     int roi_stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, roi_w);
@@ -2156,8 +2147,30 @@ draw_roi_area_func (GtkDrawingArea *area,
     cairo_rectangle(cr, 0, 0, width, height);
     cairo_clip(cr);
 
-    cairo_translate(cr, off_x, off_y);
+    // Calculate dimensions considering rotation
+    double eff_w = (app->rot_angle % 2 == 0) ? roi_w : roi_h;
+    double eff_h = (app->rot_angle % 2 == 0) ? roi_h : roi_w;
+
+    double scale_x = (double)width / eff_w;
+    double scale_y = (double)height / eff_h;
+    double scale = (scale_x < scale_y) ? scale_x : scale_y;
+
+    // Transform to match Main Display orientation
+    // 1. Center in Widget
+    cairo_translate(cr, width / 2.0, height / 2.0);
+
+    // 2. Scale
     cairo_scale(cr, scale, scale);
+
+    // 3. Rotate
+    cairo_rotate(cr, app->rot_angle * (M_PI / 2.0));
+
+    // 4. Flip
+    // Flip Y: TRUE -> 1 (Top-Down), FALSE -> -1 (Bottom-Up/Cartesian)
+    cairo_scale(cr, app->flip_x ? -1.0 : 1.0, app->flip_y ? 1.0 : -1.0);
+
+    // 5. Center Object (Move top-left of object to origin)
+    cairo_translate(cr, -roi_w / 2.0, -roi_h / 2.0);
 
     // Draw
     cairo_set_source_surface(cr, surface, 0, 0);
@@ -2203,7 +2216,7 @@ draw_image_area_func (GtkDrawingArea *area,
     cairo_translate(cr, cx, cy);
     cairo_scale(cr, scale, scale);
     cairo_rotate(cr, app->rot_angle * (M_PI / 2.0));
-    cairo_scale(cr, app->flip_x ? -1.0 : 1.0, app->flip_y ? -1.0 : 1.0);
+    cairo_scale(cr, app->flip_x ? -1.0 : 1.0, app->flip_y ? 1.0 : -1.0);
     cairo_translate(cr, -app->img_width / 2.0, -app->img_height / 2.0);
 
     cairo_set_source_surface(cr, surface, 0, 0);
@@ -2237,7 +2250,7 @@ widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy) {
 
     // Inv Flip
     if (app->flip_x) x = -x;
-    if (app->flip_y) y = -y;
+    if (!app->flip_y) y = -y;
 
     // Inv Translate (center)
     x += app->img_width / 2.0;
@@ -2271,7 +2284,7 @@ draw_selection_func (GtkDrawingArea *area,
     cairo_translate(cr, cx, cy);
     cairo_scale(cr, scale, scale);
     cairo_rotate(cr, app->rot_angle * (M_PI / 2.0));
-    cairo_scale(cr, app->flip_x ? -1.0 : 1.0, app->flip_y ? -1.0 : 1.0);
+    cairo_scale(cr, app->flip_x ? -1.0 : 1.0, app->flip_y ? 1.0 : -1.0);
     cairo_translate(cr, -app->img_width / 2.0, -app->img_height / 2.0);
 
     // Draw Origin Dot (0,0) - Yellow
@@ -2317,7 +2330,7 @@ draw_selection_func (GtkDrawingArea *area,
         cairo_translate(cr, cx, cy);
         cairo_scale(cr, scale, scale);
         cairo_rotate(cr, app->rot_angle * (M_PI / 2.0));
-        cairo_scale(cr, app->flip_x ? -1.0 : 1.0, app->flip_y ? -1.0 : 1.0);
+        cairo_scale(cr, app->flip_x ? -1.0 : 1.0, app->flip_y ? 1.0 : -1.0);
         cairo_translate(cr, -app->img_width / 2.0, -app->img_height / 2.0);
 
         cairo_set_source_rgb(cr, 1, 0, 0);
@@ -2481,7 +2494,7 @@ drag_update (GtkGestureDrag *gesture,
 
         // Inv Flip
         if (app->flip_x) dx = -dx;
-        if (app->flip_y) dy = -dy;
+        if (!app->flip_y) dy = -dy;
 
         int idx = (int)dx;
         int idy = (int)dy;
@@ -3777,7 +3790,7 @@ activate (GtkApplication *app,
 
     viewer->fit_window = TRUE;
     viewer->zoom_factor = 1.0;
-    viewer->flip_y = TRUE; // Default Cartesian (0,0 bottom left)
+    viewer->flip_y = FALSE; // Default Cartesian (0,0 bottom left) with new logic
 
     // Set initial colormap range
     viewer->cmap_min = 0.0;

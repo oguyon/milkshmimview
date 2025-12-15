@@ -1157,6 +1157,8 @@ update_zoom_layout(ViewerApp *app) {
 
     if (app->fit_window) {
         gtk_widget_set_size_request(app->image_area, -1, -1);
+        gtk_widget_set_size_request(app->selection_area, -1, -1);
+
         gtk_widget_set_halign(app->image_area, GTK_ALIGN_FILL);
         gtk_widget_set_valign(app->image_area, GTK_ALIGN_FILL);
 
@@ -1177,6 +1179,7 @@ update_zoom_layout(ViewerApp *app) {
         int req_h = (int)(eff_h * app->zoom_factor);
 
         gtk_widget_set_size_request(app->image_area, req_w, req_h);
+        gtk_widget_set_size_request(app->selection_area, req_w, req_h);
 
         gtk_widget_set_halign(app->image_area, GTK_ALIGN_CENTER);
         gtk_widget_set_valign(app->image_area, GTK_ALIGN_CENTER);
@@ -2732,6 +2735,8 @@ calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int
 
     if (mode_min == AUTO_MANUAL && mode_max == AUTO_MAX_MANUAL) return;
 
+    gboolean roi_calculated = FALSE;
+
     if (app->autoscale_source_roi && app->selection_active) {
         // Extract ROI data
         int x1 = app->sel_x1; int x2 = app->sel_x2 + 1;
@@ -2758,13 +2763,15 @@ calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int
 
                 calculate_limits_from_buffer(roi_buf, roi_count, datatype, mode_min, mode_max, new_min, new_max);
                 free(roi_buf);
-                return;
+                roi_calculated = TRUE;
             }
         }
     }
 
-    // Fallback to Full Frame
-    calculate_limits_from_buffer(raw_data, (size_t)width * height, datatype, mode_min, mode_max, new_min, new_max);
+    if (!roi_calculated) {
+        // Fallback to Full Frame
+        calculate_limits_from_buffer(raw_data, (size_t)width * height, datatype, mode_min, mode_max, new_min, new_max);
+    }
 
     // Apply Gain (Smoothing) if in Auto Mode
     // formula: val = gain * new + (1-gain) * old

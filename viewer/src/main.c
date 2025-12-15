@@ -2230,8 +2230,9 @@ draw_image_area_func (GtkDrawingArea *area,
 static void
 widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy) {
     double cx, cy, scale;
-    int w = gtk_widget_get_width(app->image_area);
-    int h = gtk_widget_get_height(app->image_area);
+    // Use selection_area dimensions because events originate from the selection_area overlay
+    int w = gtk_widget_get_width(app->selection_area);
+    int h = gtk_widget_get_height(app->selection_area);
     get_image_screen_geometry(app, w, h, &cx, &cy, &scale);
 
     // Inverse Transform
@@ -2339,6 +2340,33 @@ draw_selection_func (GtkDrawingArea *area,
         cairo_stroke(cr);
 
         cairo_restore(cr);
+    }
+
+    // Draw Frame Counter if Controls Hidden
+    if (app->vbox_controls && !gtk_widget_get_visible(app->vbox_controls) && app->image) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "cnt: %lu", (unsigned long)app->image->md->cnt0);
+
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, 14);
+
+        cairo_text_extents_t extents;
+        cairo_text_extents(cr, buf, &extents);
+
+        double text_w = extents.width + 10;
+        double text_h = extents.height + 6;
+        double x = width - text_w - 5;
+        double y = 5;
+
+        // Background
+        cairo_set_source_rgba(cr, 0, 0, 0, 0.5);
+        cairo_rectangle(cr, x, y, text_w, text_h);
+        cairo_fill(cr);
+
+        // Text
+        cairo_set_source_rgb(cr, 1, 1, 0); // Yellow
+        cairo_move_to(cr, x + 5, y + text_h - 6);
+        cairo_show_text(cr, buf);
     }
 }
 

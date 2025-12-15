@@ -250,6 +250,11 @@ typedef struct {
     GtkWidget *btn_pause;
     struct timespec last_fps_time;
     uint64_t last_fps_cnt;
+
+    // Track mouse on main image for live updates
+    gboolean mouse_over_main;
+    double last_mouse_x_main;
+    double last_mouse_y_main;
 } ViewerApp;
 
 // Command line option variables
@@ -507,6 +512,9 @@ on_motion_main (GtkEventControllerMotion *controller,
                 gpointer                  user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
+    app->mouse_over_main = TRUE;
+    app->last_mouse_x_main = x;
+    app->last_mouse_y_main = y;
     update_pixel_info(app, app->lbl_pixel_info_main, x, y, FALSE);
 }
 
@@ -528,6 +536,7 @@ on_leave (GtkEventControllerMotion *controller,
     ViewerApp *app = (ViewerApp *)user_data;
 
     if (widget == app->selection_area) {
+        app->mouse_over_main = FALSE;
         gtk_widget_set_visible(app->lbl_pixel_info_main, FALSE);
     } else if (widget == app->roi_image_area) {
         gtk_widget_set_visible(app->lbl_pixel_info_roi, FALSE);
@@ -1175,7 +1184,7 @@ draw_colorbar_func (GtkDrawingArea *area,
     ViewerApp *app = (ViewerApp *)user_data;
 
     int bar_width = 20;
-    int bar_x = (width - bar_width) / 2;
+    int bar_x = 5;
     int margin_top = 20;
     int margin_bottom = 20;
     int bar_height = height - margin_top - margin_bottom;
@@ -2965,6 +2974,11 @@ update_display (gpointer user_data)
         app->force_redraw = FALSE;
         draw_image(app);
 
+        // Update live pixel info if mouse is hovering
+        if (app->mouse_over_main) {
+            update_pixel_info(app, app->lbl_pixel_info_main, app->last_mouse_x_main, app->last_mouse_y_main, FALSE);
+        }
+
         // Update counter label (only when image updates)
         char buf[64];
         snprintf(buf, sizeof(buf), "Counter: %lu", last_cnt0);
@@ -3292,6 +3306,7 @@ activate (GtkApplication *app,
     gtk_widget_set_valign(box_overlay_btns, GTK_ALIGN_START);
     gtk_widget_set_margin_start(box_overlay_btns, 5);
     gtk_widget_set_margin_top(box_overlay_btns, 5);
+    gtk_widget_set_can_target(box_overlay_btns, FALSE);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), box_overlay_btns);
 
     // Ctrl Overlay Button (Hidden by default, shown when panel hidden)
@@ -3334,7 +3349,7 @@ activate (GtkApplication *app,
 
     // Colorbar
     viewer->colorbar = gtk_drawing_area_new ();
-    gtk_widget_set_size_request (viewer->colorbar, 60, -1);
+    gtk_widget_set_size_request (viewer->colorbar, 100, -1);
     gtk_widget_set_vexpand(viewer->colorbar, TRUE);
     gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (viewer->colorbar), draw_colorbar_func, viewer, NULL);
 

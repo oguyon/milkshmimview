@@ -3306,7 +3306,6 @@ activate (GtkApplication *app,
     gtk_widget_set_valign(box_overlay_btns, GTK_ALIGN_START);
     gtk_widget_set_margin_start(box_overlay_btns, 5);
     gtk_widget_set_margin_top(box_overlay_btns, 5);
-    gtk_widget_set_can_target(box_overlay_btns, FALSE);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), box_overlay_btns);
 
     // Ctrl Overlay Button (Hidden by default, shown when panel hidden)

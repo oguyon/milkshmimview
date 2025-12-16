@@ -3268,13 +3268,13 @@ activate (GtkApplication *app,
     // Zoom Dropdown
     const char *zoom_levels[] = {"1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x", NULL};
     viewer->dropdown_zoom = gtk_drop_down_new_from_strings (zoom_levels);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_zoom), 3);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_zoom), 4); // 2x
     g_signal_connect (viewer->dropdown_zoom, "notify::selected", G_CALLBACK (on_dropdown_zoom_changed), viewer);
     gtk_box_append (GTK_BOX (row), viewer->dropdown_zoom);
 
     // Fit Toggle
     viewer->btn_fit_window = gtk_check_button_new_with_label ("fit");
-    gtk_check_button_set_active (GTK_CHECK_BUTTON (viewer->btn_fit_window), TRUE);
+    gtk_check_button_set_active (GTK_CHECK_BUTTON (viewer->btn_fit_window), FALSE);
     g_signal_connect (viewer->btn_fit_window, "toggled", G_CALLBACK (on_fit_window_toggled), viewer);
     gtk_box_append (GTK_BOX (row), viewer->btn_fit_window);
 
@@ -3350,7 +3350,7 @@ activate (GtkApplication *app,
     // Auto Scale Gain Dropdown
     const char *gain_opts[] = {"1.00", "0.50", "0.20", "0.10", "0.05", "0.02", "0.01", NULL};
     viewer->dropdown_gain = gtk_drop_down_new_from_strings(gain_opts);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_gain), 0); // Default 1.00
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_gain), 3); // Default 0.10
     g_signal_connect(viewer->dropdown_gain, "notify::selected", G_CALLBACK(on_gain_changed), viewer);
     gtk_box_append(GTK_BOX(row), viewer->dropdown_gain);
 
@@ -3525,14 +3525,14 @@ activate (GtkApplication *app,
     viewer->btn_ctrl_overlay = gtk_button_new_with_label("ctrl");
     gtk_widget_set_opacity(viewer->btn_ctrl_overlay, 0.7);
     g_signal_connect(viewer->btn_ctrl_overlay, "clicked", G_CALLBACK(on_show_controls_clicked), viewer);
-    gtk_widget_set_visible(viewer->btn_ctrl_overlay, FALSE);
+    gtk_widget_set_visible(viewer->btn_ctrl_overlay, TRUE);
     gtk_box_append(GTK_BOX(box_overlay_btns), viewer->btn_ctrl_overlay);
 
     // Stats Overlay Button (Hidden by default, shown when panel hidden)
     viewer->btn_stats_overlay = gtk_button_new_with_label("stats");
     gtk_widget_set_opacity(viewer->btn_stats_overlay, 0.7);
     g_signal_connect(viewer->btn_stats_overlay, "clicked", G_CALLBACK(on_show_right_panel_clicked), viewer);
-    gtk_widget_set_visible(viewer->btn_stats_overlay, FALSE);
+    gtk_widget_set_visible(viewer->btn_stats_overlay, TRUE);
     gtk_box_append(GTK_BOX(box_overlay_btns), viewer->btn_stats_overlay);
 
     drag_controller = gtk_gesture_drag_new();
@@ -3579,7 +3579,7 @@ activate (GtkApplication *app,
 
     // Stats Panel Container (Right)
     viewer->vbox_stats = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_widget_set_visible(viewer->vbox_stats, TRUE); // Start visible
+    gtk_widget_set_visible(viewer->vbox_stats, FALSE); // Start hidden
     gtk_box_append(GTK_BOX(hbox_right), viewer->vbox_stats);
 
     // Stats Header (Update + Hide)
@@ -3588,7 +3588,7 @@ activate (GtkApplication *app,
 
     // Update Toggle
     viewer->btn_stats_update = gtk_check_button_new_with_label("Update");
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(viewer->btn_stats_update), TRUE);
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(viewer->btn_stats_update), FALSE);
     gtk_widget_set_hexpand(viewer->btn_stats_update, TRUE);
     gtk_box_append(GTK_BOX(hbox_stats_header), viewer->btn_stats_update);
 
@@ -3833,10 +3833,10 @@ activate (GtkApplication *app,
     // Initialize UI State based on CLI args
     // Set Dropdowns for Auto/Manual
     if (viewer->fixed_min) gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_min_mode), AUTO_MANUAL);
-    else gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_min_mode), AUTO_DATA);
+    else gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_min_mode), viewer->last_min_mode);
 
     if (viewer->fixed_max) gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_max_mode), AUTO_MAX_MANUAL);
-    else gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_max_mode), AUTO_MAX_DATA);
+    else gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_max_mode), viewer->last_max_mode);
 
     gtk_widget_set_sensitive (viewer->spin_min, viewer->fixed_min);
     gtk_widget_set_sensitive (viewer->spin_max, viewer->fixed_max);
@@ -3844,8 +3844,10 @@ activate (GtkApplication *app,
     if (viewer->fixed_min) gtk_spin_button_set_value (GTK_SPIN_BUTTON (viewer->spin_min), viewer->min_val);
     if (viewer->fixed_max) gtk_spin_button_set_value (GTK_SPIN_BUTTON (viewer->spin_max), viewer->max_val);
 
-    viewer->fit_window = TRUE;
-    viewer->zoom_factor = 1.0;
+    // Initial Controls Visibility
+    gtk_widget_set_visible(viewer->vbox_controls, FALSE);
+
+    viewer->fit_window = FALSE;
     viewer->flip_y = FALSE; // Default Cartesian (0,0 bottom left) with new logic
 
     // Set initial colormap range
@@ -3908,11 +3910,12 @@ main (int    argc,
     viewer.trace_hist_max = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
 
     viewer.trace_duration = 10.0; // Default 10s
-    viewer.auto_gain = 1.0;
+    viewer.auto_gain = 0.1;
+    viewer.zoom_factor = 2.0;
     clock_gettime(CLOCK_MONOTONIC, &viewer.program_start_time);
 
-    viewer.last_min_mode = AUTO_DATA;
-    viewer.last_max_mode = AUTO_MAX_DATA;
+    viewer.last_min_mode = AUTO_P01;
+    viewer.last_max_mode = AUTO_MAX_P99;
 
     app = gtk_application_new ("org.milk.shmimview", G_APPLICATION_NON_UNIQUE);
     g_signal_connect (app, "activate", G_CALLBACK (activate), &viewer);

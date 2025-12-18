@@ -291,6 +291,7 @@ static double opt_min = 0;
 static double opt_max = 0;
 static gboolean has_min = FALSE;
 static gboolean has_max = FALSE;
+static int opt_history = 0;
 
 // Custom callback to flag if options were set
 static gboolean
@@ -319,6 +320,7 @@ static GOptionEntry entries[] =
 {
   { "min", 'm', G_OPTION_FLAG_NONE, G_OPTION_ARG_CALLBACK, parse_min_cb, "Minimum value for scaling", "VAL" },
   { "max", 'M', G_OPTION_FLAG_NONE, G_OPTION_ARG_CALLBACK, parse_max_cb, "Maximum value for scaling", "VAL" },
+  { "history", 'H', G_OPTION_FLAG_NONE, G_OPTION_ARG_INT, &opt_history, "Number of frames for history playback (default: 0)", "N" },
   { NULL }
 };
 
@@ -4170,8 +4172,14 @@ main (int    argc,
     viewer.trace_cnt0 = (uint64_t*)calloc(TRACE_MAX_SAMPLES, sizeof(uint64_t));
 
     // Allocate Internal Image History
-    viewer.img_history_capacity = IMG_HISTORY_FRAMES;
-    viewer.img_history_cnt0 = (uint64_t*)calloc(IMG_HISTORY_FRAMES, sizeof(uint64_t));
+    if (opt_history > 0) {
+        viewer.img_history_capacity = opt_history;
+        viewer.img_history_cnt0 = (uint64_t*)calloc(opt_history, sizeof(uint64_t));
+    } else {
+        viewer.img_history_capacity = 0;
+        viewer.img_history_cnt0 = NULL;
+    }
+
     viewer.trace_min = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
     viewer.trace_max = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
     viewer.trace_mean = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));

@@ -7,6 +7,7 @@
 
 #define TRACE_MAX_SAMPLES 360000
 #define TRACE_HIST_BINS 256
+#define IMG_HISTORY_FRAMES 2000
 
 // Enums for Dropdowns
 enum {
@@ -276,6 +277,13 @@ typedef struct {
     void *history_buffer;
     size_t history_buffer_size;
     uint64_t current_cnt0;
+
+    // Internal Circular Buffer
+    void *img_history_data; // Flat buffer: frames * frame_size
+    uint64_t *img_history_cnt0; // cnt0 for each frame
+    size_t img_history_head; // Insertion point
+    size_t img_history_capacity; // In frames
+    size_t img_history_frame_size; // In bytes
 } ViewerApp;
 
 // Command line option variables
@@ -3153,6 +3161,26 @@ draw_image (ViewerApp *app)
         if (src_ptr) {
             memcpy(app->raw_buffer, src_ptr, frame_size);
             app->current_cnt0 = app->image->md->cnt0;
+
+            // Record to internal circular buffer if recording (based on app running)
+            if (app->img_history_capacity > 0) {
+                // Resize internal buffer if frame size changed
+                if (frame_size != app->img_history_frame_size) {
+                    if (app->img_history_data) free(app->img_history_data);
+                    app->img_history_frame_size = frame_size;
+                    app->img_history_data = malloc(app->img_history_capacity * frame_size);
+                    // Reset head
+                    app->img_history_head = 0;
+                    memset(app->img_history_cnt0, 0, app->img_history_capacity * sizeof(uint64_t));
+                }
+
+                if (app->img_history_data) {
+                    void *dst_ptr = (char*)app->img_history_data + (app->img_history_head * frame_size);
+                    memcpy(dst_ptr, src_ptr, frame_size);
+                    app->img_history_cnt0[app->img_history_head] = app->image->md->cnt0;
+                    app->img_history_head = (app->img_history_head + 1) % app->img_history_capacity;
+                }
+            }
         }
     }
 
@@ -3171,16 +3199,24 @@ draw_image (ViewerApp *app)
              app->history_buffer_size = frame_size;
         }
 
-        if (app->trace_cnt0 && app->image->md->naxis == 3 && (app->image->md->imagetype & CIRCULAR_BUFFER)) {
-            uint64_t target_cnt = app->trace_cnt0[app->trace_cursor_idx];
-            uint64_t slice_index = target_cnt % app->image->md->size[2];
-            void *src_ptr = (char*)app->image->array.raw + (slice_index * frame_size);
-            if (src_ptr && app->history_buffer) {
-                memcpy(app->history_buffer, src_ptr, frame_size);
-                raw_data = app->history_buffer;
-                // Note: We don't update app->current_cnt0 here because that tracks raw_buffer (live/frozen state)
-                // But we pass target_cnt to stats
+        uint64_t target_cnt = app->trace_cnt0[app->trace_cursor_idx];
+
+        // Search in internal buffer
+        // Simple linear search is fast enough for 2000 items
+        int found_idx = -1;
+        if (app->img_history_cnt0) {
+            for (size_t i = 0; i < app->img_history_capacity; ++i) {
+                if (app->img_history_cnt0[i] == target_cnt) {
+                    found_idx = (int)i;
+                    break;
+                }
             }
+        }
+
+        if (found_idx >= 0 && app->img_history_data && app->history_buffer) {
+            void *src_ptr = (char*)app->img_history_data + (found_idx * frame_size);
+            memcpy(app->history_buffer, src_ptr, frame_size);
+            raw_data = app->history_buffer;
         }
     }
 
@@ -4132,6 +4168,10 @@ main (int    argc,
     // Allocate Trace Memory
     viewer.trace_time = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
     viewer.trace_cnt0 = (uint64_t*)calloc(TRACE_MAX_SAMPLES, sizeof(uint64_t));
+
+    // Allocate Internal Image History
+    viewer.img_history_capacity = IMG_HISTORY_FRAMES;
+    viewer.img_history_cnt0 = (uint64_t*)calloc(IMG_HISTORY_FRAMES, sizeof(uint64_t));
     viewer.trace_min = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
     viewer.trace_max = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
     viewer.trace_mean = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
@@ -4164,6 +4204,8 @@ main (int    argc,
     if (viewer.raw_buffer) free(viewer.raw_buffer);
     if (viewer.history_buffer) free(viewer.history_buffer);
     if (viewer.hist_data) free(viewer.hist_data);
+    if (viewer.img_history_data) free(viewer.img_history_data);
+    if (viewer.img_history_cnt0) free(viewer.img_history_cnt0);
 
     if (viewer.trace_time) free(viewer.trace_time);
     if (viewer.trace_cnt0) free(viewer.trace_cnt0);

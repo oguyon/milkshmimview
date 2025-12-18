@@ -270,6 +270,12 @@ typedef struct {
     // Auto Scale Gain
     double auto_gain;
     GtkWidget *dropdown_gain;
+
+    // History playback
+    uint64_t *trace_cnt0;
+    void *history_buffer;
+    size_t history_buffer_size;
+    uint64_t current_cnt0;
 } ViewerApp;
 
 // Command line option variables
@@ -697,6 +703,11 @@ on_pause_toggled (GtkToggleButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     app->paused = gtk_toggle_button_get_active(btn);
+
+    if (app->paused) {
+        // Automatically disable Stats Update when paused
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(app->btn_stats_update), FALSE);
+    }
 }
 
 static void
@@ -1789,7 +1800,7 @@ on_click_trace_pressed (GtkGestureClick *gesture,
 }
 
 static void
-update_trace_data(ViewerApp *app, double min, double max, double mean, double median, double p01, double p09,
+update_trace_data(ViewerApp *app, uint64_t cnt0, double min, double max, double mean, double median, double p01, double p09,
                   uint32_t *hist, double hist_min, double hist_max) {
     if (!app->trace_active) return;
 
@@ -1801,6 +1812,7 @@ update_trace_data(ViewerApp *app, double min, double max, double mean, double me
 
     int idx = app->trace_head;
     app->trace_time[idx] = t;
+    app->trace_cnt0[idx] = cnt0;
     app->trace_min[idx] = min;
     app->trace_max[idx] = max;
     app->trace_mean[idx] = mean;
@@ -2967,7 +2979,7 @@ calculate_autoscale_limits(ViewerApp *app, double *new_min, double *new_max, int
 }
 
 static void
-calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8_t datatype) {
+calculate_and_update_stats(ViewerApp *app, void *raw_data, int width, int height, uint8_t datatype, gboolean update_trace, uint64_t cnt0) {
     if (!app->selection_active) return;
 
     int x1 = app->sel_x1;
@@ -3081,8 +3093,10 @@ calculate_roi_stats(ViewerApp *app, void *raw_data, int width, int height, uint8
     snprintf(buf, sizeof(buf), "%.4g", p09);
     gtk_editable_set_text(GTK_EDITABLE(app->entry_stat_p09), buf);
 
-    update_trace_data(app, min_v, max_v, mean, median, p01, p09,
-                      app->hist_data, app->current_min, app->current_max);
+    if (update_trace) {
+        update_trace_data(app, cnt0, min_v, max_v, mean, median, p01, p09,
+                          app->hist_data, app->current_min, app->current_max);
+    }
 
     // New Stats
     snprintf(buf, sizeof(buf), "%zu", count);
@@ -3132,19 +3146,55 @@ draw_image (ViewerApp *app)
 
         if (src_ptr) {
             memcpy(app->raw_buffer, src_ptr, frame_size);
+            app->current_cnt0 = app->image->md->cnt0;
         }
     }
 
     void *raw_data = app->raw_buffer;
+
+    // Check for History Mode (Paused + Trace Hover + Update Off)
+    gboolean is_history = (app->paused &&
+                           !gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update)) &&
+                           app->trace_cursor_active);
+
+    if (is_history) {
+        // Fetch historical frame
+        if (!app->history_buffer || app->history_buffer_size < frame_size) {
+             if (app->history_buffer) free(app->history_buffer);
+             app->history_buffer = malloc(frame_size);
+             app->history_buffer_size = frame_size;
+        }
+
+        if (app->trace_cnt0 && app->image->md->naxis == 3 && (app->image->md->imagetype & CIRCULAR_BUFFER)) {
+            uint64_t target_cnt = app->trace_cnt0[app->trace_cursor_idx];
+            uint64_t slice_index = target_cnt % app->image->md->size[2];
+            void *src_ptr = (char*)app->image->array.raw + (slice_index * frame_size);
+            if (src_ptr && app->history_buffer) {
+                memcpy(app->history_buffer, src_ptr, frame_size);
+                raw_data = app->history_buffer;
+                // Note: We don't update app->current_cnt0 here because that tracks raw_buffer (live/frozen state)
+                // But we pass target_cnt to stats
+            }
+        }
+    }
+
     if (!raw_data) return;
 
     app->img_width = width;
     app->img_height = height;
 
-    // Calculate Stats if selection active (and we are running, or forced update)
-    // When paused, we might still want to update stats if ROI moves, so we allow it.
-    if (app->selection_active && gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update))) {
-        calculate_roi_stats(app, raw_data, width, height, datatype);
+    // Calculate Stats
+    // We update stats if panel is visible OR if recording is active.
+    // If recording is active (btn_stats_update checked), we push to trace.
+    gboolean update_trace = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->btn_stats_update));
+    gboolean stats_visible = gtk_widget_get_visible(app->vbox_stats);
+
+    // Don't update trace if in history mode (avoid polluting trace with history)
+    if (is_history) update_trace = FALSE;
+
+    if (app->selection_active && (stats_visible || update_trace)) {
+        uint64_t cnt = is_history ? app->trace_cnt0[app->trace_cursor_idx] : app->current_cnt0;
+        calculate_and_update_stats(app, raw_data, width, height, datatype, update_trace, cnt);
     }
 
     int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, width);
@@ -4075,6 +4125,7 @@ main (int    argc,
 
     // Allocate Trace Memory
     viewer.trace_time = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
+    viewer.trace_cnt0 = (uint64_t*)calloc(TRACE_MAX_SAMPLES, sizeof(uint64_t));
     viewer.trace_min = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
     viewer.trace_max = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
     viewer.trace_mean = (double*)calloc(TRACE_MAX_SAMPLES, sizeof(double));
@@ -4105,9 +4156,11 @@ main (int    argc,
     }
     if (viewer.display_buffer) free(viewer.display_buffer);
     if (viewer.raw_buffer) free(viewer.raw_buffer);
+    if (viewer.history_buffer) free(viewer.history_buffer);
     if (viewer.hist_data) free(viewer.hist_data);
 
     if (viewer.trace_time) free(viewer.trace_time);
+    if (viewer.trace_cnt0) free(viewer.trace_cnt0);
     if (viewer.trace_min) free(viewer.trace_min);
     if (viewer.trace_max) free(viewer.trace_max);
     if (viewer.trace_mean) free(viewer.trace_mean);

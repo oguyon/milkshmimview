@@ -248,7 +248,7 @@ typedef struct {
     GtkWidget *roi_image_area;
 
     // UI Control
-    GtkWidget *vbox_controls;
+    GtkWidget *notebook_controls;
     GtkWidget *hbox_right;
     GtkWidget *btn_ctrl_overlay;
     GtkWidget *btn_stats_overlay;
@@ -739,7 +739,7 @@ static void
 on_hide_controls_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    gtk_widget_set_visible(app->vbox_controls, FALSE);
+    gtk_widget_set_visible(app->notebook_controls, FALSE);
     gtk_widget_set_visible(app->btn_ctrl_overlay, TRUE);
 }
 
@@ -747,7 +747,7 @@ static void
 on_show_controls_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    gtk_widget_set_visible(app->vbox_controls, TRUE);
+    gtk_widget_set_visible(app->notebook_controls, TRUE);
     gtk_widget_set_visible(app->btn_ctrl_overlay, FALSE);
 }
 
@@ -2556,7 +2556,7 @@ draw_selection_func (GtkDrawingArea *area,
     }
 
     // Draw Frame Counter if Controls Hidden
-    if (app->vbox_controls && !gtk_widget_get_visible(app->vbox_controls) && app->image) {
+    if (app->notebook_controls && !gtk_widget_get_visible(app->notebook_controls) && app->image) {
         char buf[64];
         snprintf(buf, sizeof(buf), "cnt: %lu", (unsigned long)app->image->md->cnt0);
 
@@ -3434,7 +3434,7 @@ activate (GtkApplication *app,
     ViewerApp *viewer = (ViewerApp *)user_data;
     GtkWidget *window;
     GtkWidget *hbox;
-    GtkWidget *vbox_controls;
+    GtkWidget *vbox_main;
     GtkWidget *hbox_right;
     GtkWidget *scrolled_window;
     GtkWidget *overlay;
@@ -3450,248 +3450,260 @@ activate (GtkApplication *app,
     gtk_window_set_title (GTK_WINDOW (window), "ImageStreamIO Viewer");
     gtk_window_set_default_size (GTK_WINDOW (window), 1000, 700);
 
-    GtkWidget *paned_root = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_paned_set_position(GTK_PANED(paned_root), 200);
-    gtk_window_set_child(GTK_WINDOW(window), paned_root);
+    // Root Vertical Box (Top: Controls, Bottom: Images+Stats)
+    vbox_main = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_window_set_child(GTK_WINDOW(window), vbox_main);
 
-    // Sidebar Controls (Left)
-    viewer->vbox_controls = gtk_box_new (GTK_ORIENTATION_VERTICAL, 10);
-    gtk_widget_set_size_request (viewer->vbox_controls, 160, -1);
-    gtk_widget_set_hexpand(viewer->vbox_controls, FALSE);
-    gtk_widget_set_margin_start (viewer->vbox_controls, 10);
-    gtk_widget_set_margin_end (viewer->vbox_controls, 10);
-    gtk_widget_set_margin_top (viewer->vbox_controls, 10);
-    gtk_widget_set_margin_bottom (viewer->vbox_controls, 10);
+    // Notebook Controls (Top)
+    viewer->notebook_controls = gtk_notebook_new();
+    gtk_widget_set_hexpand(viewer->notebook_controls, TRUE);
+    gtk_widget_set_vexpand(viewer->notebook_controls, FALSE);
+    gtk_box_append(GTK_BOX(vbox_main), viewer->notebook_controls);
 
-    gtk_paned_set_start_child(GTK_PANED(paned_root), viewer->vbox_controls);
-    gtk_paned_set_resize_start_child(GTK_PANED(paned_root), FALSE);
-    gtk_paned_set_shrink_start_child(GTK_PANED(paned_root), FALSE);
+    // --- Tab 1: View ---
+    GtkWidget *box_view = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_margin_top(box_view, 5);
+    gtk_widget_set_margin_bottom(box_view, 5);
+    gtk_widget_set_margin_start(box_view, 5);
+    gtk_widget_set_margin_end(box_view, 5);
+    gtk_notebook_append_page(GTK_NOTEBOOK(viewer->notebook_controls), box_view, gtk_label_new("View"));
 
-    // Hide Button
-    GtkWidget *btn_hide = gtk_button_new_with_label("Hide Panel");
-    g_signal_connect(btn_hide, "clicked", G_CALLBACK(on_hide_controls_clicked), viewer);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), btn_hide);
+    // Group: Info
+    GtkWidget *vbox_info = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_view), vbox_info);
 
-    // Counter
-    viewer->lbl_counter = gtk_label_new("Counter: 0");
-    gtk_widget_set_halign(viewer->lbl_counter, GTK_ALIGN_START);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), viewer->lbl_counter);
-
-    GtkWidget *row;
-
-    // FPS Control
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
-    label = gtk_label_new("FPS");
-    gtk_box_append(GTK_BOX(row), label);
-    const char *fps_opts[] = {"1 Hz", "2 Hz", "5 Hz", "10 Hz", "25 Hz", "50 Hz", "100 Hz", NULL};
-    viewer->dropdown_fps = gtk_drop_down_new_from_strings(fps_opts);
-    gtk_widget_set_hexpand(viewer->dropdown_fps, TRUE);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_fps), 4); // 25Hz default
-    g_signal_connect(viewer->dropdown_fps, "notify::selected", G_CALLBACK(on_fps_changed), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->dropdown_fps);
+    viewer->lbl_counter = gtk_label_new("Cnt: 0");
+    gtk_box_append(GTK_BOX(vbox_info), viewer->lbl_counter);
 
     viewer->lbl_fps_est = gtk_label_new("0.0 Hz");
-    gtk_box_append(GTK_BOX(row), viewer->lbl_fps_est);
+    gtk_box_append(GTK_BOX(vbox_info), viewer->lbl_fps_est);
 
-    // Pause Button
+    // Group: Stream
+    GtkWidget *vbox_stream = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_view), vbox_stream);
+
+    const char *fps_opts[] = {"1 Hz", "2 Hz", "5 Hz", "10 Hz", "25 Hz", "50 Hz", "100 Hz", NULL};
+    viewer->dropdown_fps = gtk_drop_down_new_from_strings(fps_opts);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_fps), 4);
+    g_signal_connect(viewer->dropdown_fps, "notify::selected", G_CALLBACK(on_fps_changed), viewer);
+    gtk_box_append(GTK_BOX(vbox_stream), viewer->dropdown_fps);
+
     viewer->btn_pause = gtk_toggle_button_new_with_label("Pause");
     g_signal_connect(viewer->btn_pause, "toggled", G_CALLBACK(on_pause_toggled), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->btn_pause);
+    gtk_box_append(GTK_BOX(vbox_stream), viewer->btn_pause);
 
-    // Cmap & Scale Row
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+    gtk_box_append(GTK_BOX(box_view), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
-    label = gtk_label_new("Cmap");
-    gtk_box_append(GTK_BOX(row), label);
+    // Group: Display (Cmap/Scale)
+    GtkWidget *vbox_disp = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_view), vbox_disp);
+
     const char *cmap_opts[] = {"Grey", "Red", "Green", "Blue", "Heat", "Cool", "Rainbow", "A", "B", NULL};
     viewer->dropdown_cmap = gtk_drop_down_new_from_strings(cmap_opts);
-    gtk_widget_set_hexpand(viewer->dropdown_cmap, TRUE);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_cmap), COLORMAP_GREY);
     g_signal_connect(viewer->dropdown_cmap, "notify::selected", G_CALLBACK(on_cmap_changed), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->dropdown_cmap);
+    gtk_box_append(GTK_BOX(vbox_disp), viewer->dropdown_cmap);
 
-    label = gtk_label_new("Scale");
-    gtk_box_append(GTK_BOX(row), label);
     const char *scale_opts[] = {"Linear", "Log", "Sqrt", "Square", "Asinh", NULL};
     viewer->dropdown_scale = gtk_drop_down_new_from_strings(scale_opts);
-    gtk_widget_set_hexpand(viewer->dropdown_scale, TRUE);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_scale), SCALE_LINEAR);
     g_signal_connect(viewer->dropdown_scale, "notify::selected", G_CALLBACK(on_scale_changed), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->dropdown_scale);
+    gtk_box_append(GTK_BOX(vbox_disp), viewer->dropdown_scale);
 
-    // Zoom Controls
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+    gtk_box_append(GTK_BOX(box_view), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
-    // Zoom Dropdown
+    // Group: Zoom
+    GtkWidget *vbox_zoom = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_view), vbox_zoom);
+
+    GtkWidget *hbox_zoom_top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_zoom), hbox_zoom_top);
+
     const char *zoom_levels[] = {"1/8x", "1/4x", "1/2x", "1x", "2x", "4x", "8x", NULL};
     viewer->dropdown_zoom = gtk_drop_down_new_from_strings (zoom_levels);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_zoom), 4); // 2x
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_zoom), 4);
     g_signal_connect (viewer->dropdown_zoom, "notify::selected", G_CALLBACK (on_dropdown_zoom_changed), viewer);
-    gtk_box_append (GTK_BOX (row), viewer->dropdown_zoom);
+    gtk_box_append (GTK_BOX (hbox_zoom_top), viewer->dropdown_zoom);
 
-    // Fit Toggle
-    viewer->btn_fit_window = gtk_check_button_new_with_label ("fit");
-    gtk_check_button_set_active (GTK_CHECK_BUTTON (viewer->btn_fit_window), FALSE);
+    viewer->btn_fit_window = gtk_check_button_new_with_label ("Fit");
     g_signal_connect (viewer->btn_fit_window, "toggled", G_CALLBACK (on_fit_window_toggled), viewer);
-    gtk_box_append (GTK_BOX (row), viewer->btn_fit_window);
+    gtk_box_append (GTK_BOX (hbox_zoom_top), viewer->btn_fit_window);
 
-    // Zoom Label
     viewer->lbl_zoom = gtk_label_new ("100%");
-    gtk_box_append (GTK_BOX (row), viewer->lbl_zoom);
+    gtk_box_append(GTK_BOX(vbox_zoom), viewer->lbl_zoom);
 
-    // Orientation Controls
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+    gtk_box_append(GTK_BOX(box_view), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
+
+    // Group: Orientation
+    GtkWidget *vbox_orient = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_view), vbox_orient);
+
+    GtkWidget *hbox_rot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_orient), hbox_rot);
 
     GtkWidget *btn_rot_cw = gtk_button_new_with_label("-90");
     g_signal_connect(btn_rot_cw, "clicked", G_CALLBACK(on_rotate_cw_clicked), viewer);
-    gtk_box_append(GTK_BOX(row), btn_rot_cw);
+    gtk_box_append(GTK_BOX(hbox_rot), btn_rot_cw);
 
     GtkWidget *btn_rot_ccw = gtk_button_new_with_label("+90");
     g_signal_connect(btn_rot_ccw, "clicked", G_CALLBACK(on_rotate_ccw_clicked), viewer);
-    gtk_box_append(GTK_BOX(row), btn_rot_ccw);
+    gtk_box_append(GTK_BOX(hbox_rot), btn_rot_ccw);
 
     viewer->lbl_rotation = gtk_label_new("0 deg");
-    gtk_box_append(GTK_BOX(row), viewer->lbl_rotation);
+    gtk_box_append(GTK_BOX(hbox_rot), viewer->lbl_rotation);
+
+    GtkWidget *hbox_flip = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_orient), hbox_flip);
 
     GtkWidget *btn_flip_x = gtk_toggle_button_new_with_label("FlipX");
-    gtk_widget_add_css_class(btn_flip_x, "auto-scale-red"); // Reuse red style
+    gtk_widget_add_css_class(btn_flip_x, "auto-scale-red");
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn_flip_x), viewer->flip_x);
     g_signal_connect(btn_flip_x, "toggled", G_CALLBACK(on_flip_x_toggled), viewer);
-    gtk_box_append(GTK_BOX(row), btn_flip_x);
+    gtk_box_append(GTK_BOX(hbox_flip), btn_flip_x);
 
     GtkWidget *btn_flip_y = gtk_toggle_button_new_with_label("FlipY");
     gtk_widget_add_css_class(btn_flip_y, "auto-scale-red");
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn_flip_y), viewer->flip_y);
     g_signal_connect(btn_flip_y, "toggled", G_CALLBACK(on_flip_y_toggled), viewer);
-    gtk_box_append(GTK_BOX(row), btn_flip_y);
+    gtk_box_append(GTK_BOX(hbox_flip), btn_flip_y);
 
-    // Selection Controls
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+    // Hide Button (Top)
+    GtkWidget *btn_hide = gtk_button_new_with_label("Hide Controls");
+    gtk_widget_set_valign(btn_hide, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(btn_hide, TRUE);
+    gtk_widget_set_halign(btn_hide, GTK_ALIGN_END);
+    g_signal_connect(btn_hide, "clicked", G_CALLBACK(on_hide_controls_clicked), viewer);
+    gtk_box_append(GTK_BOX(box_view), btn_hide);
 
-    label = gtk_label_new ("ROI");
-    gtk_widget_set_size_request(label, 60, -1);
-    gtk_widget_set_halign (label, GTK_ALIGN_START);
-    gtk_box_append (GTK_BOX (row), label);
+    // --- Tab 2: Levels ---
+    GtkWidget *box_levels = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_margin_top(box_levels, 5);
+    gtk_widget_set_margin_bottom(box_levels, 5);
+    gtk_widget_set_margin_start(box_levels, 5);
+    gtk_widget_set_margin_end(box_levels, 5);
+    gtk_notebook_append_page(GTK_NOTEBOOK(viewer->notebook_controls), box_levels, gtk_label_new("Levels"));
 
-    viewer->btn_expand_roi = gtk_check_button_new_with_label("show");
-    g_signal_connect(viewer->btn_expand_roi, "toggled", G_CALLBACK(on_btn_expand_roi_toggled), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->btn_expand_roi);
-
-    btn_reset = gtk_button_new_with_label ("reset");
-    g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
-    gtk_box_append (GTK_BOX (row), btn_reset);
-
-    // Auto Scale Button
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
-
-    btn_autoscale = gtk_toggle_button_new_with_label ("Auto");
-    viewer->btn_autoscale = btn_autoscale;
-    g_signal_connect (btn_autoscale, "toggled", G_CALLBACK (on_btn_autoscale_toggled), viewer);
-    gtk_widget_set_hexpand(btn_autoscale, TRUE);
-    gtk_box_append (GTK_BOX (row), btn_autoscale);
-
-    // Add CSS for Auto Scale button (Red when active)
+    // Add CSS for Auto Scale button
     GtkCssProvider *provider = gtk_css_provider_new();
     gtk_css_provider_load_from_string(provider,
         ".auto-scale-red:checked { background: #aa0000; color: white; border-color: #550000; }");
-
-    gtk_widget_add_css_class(btn_autoscale, "auto-scale-red");
-
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
                                                GTK_STYLE_PROVIDER(provider),
                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 
-    // Auto Scale Gain Dropdown
-    const char *gain_opts[] = {"1.00", "0.50", "0.20", "0.10", "0.05", "0.02", "0.01", NULL};
-    viewer->dropdown_gain = gtk_drop_down_new_from_strings(gain_opts);
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_gain), 3); // Default 0.10
-    g_signal_connect(viewer->dropdown_gain, "notify::selected", G_CALLBACK(on_gain_changed), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->dropdown_gain);
+    // Group: Auto
+    GtkWidget *vbox_auto = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_levels), vbox_auto);
 
-    // Auto Scale Source Toggle
+    GtkWidget *hbox_auto_btn = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_auto), hbox_auto_btn);
+
+    btn_autoscale = gtk_toggle_button_new_with_label ("Auto");
+    viewer->btn_autoscale = btn_autoscale;
+    g_signal_connect (btn_autoscale, "toggled", G_CALLBACK (on_btn_autoscale_toggled), viewer);
+    gtk_widget_add_css_class(btn_autoscale, "auto-scale-red");
+    gtk_box_append (GTK_BOX (hbox_auto_btn), btn_autoscale);
+
     GtkWidget *btn_as_source = gtk_toggle_button_new_with_label("Full");
     viewer->btn_autoscale_source = btn_as_source;
     g_signal_connect(btn_as_source, "toggled", G_CALLBACK(on_btn_autoscale_source_toggled), viewer);
-    gtk_box_append(GTK_BOX(row), btn_as_source);
+    gtk_box_append(GTK_BOX(hbox_auto_btn), btn_as_source);
 
-    // Min Control
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
-    gtk_box_append(GTK_BOX(row), gtk_label_new("Min"));
+    const char *gain_opts[] = {"Gain: 1.00", "0.50", "0.20", "0.10", "0.05", "0.02", "0.01", NULL};
+    viewer->dropdown_gain = gtk_drop_down_new_from_strings(gain_opts);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_gain), 3);
+    g_signal_connect(viewer->dropdown_gain, "notify::selected", G_CALLBACK(on_gain_changed), viewer);
+    gtk_box_append(GTK_BOX(vbox_auto), viewer->dropdown_gain);
+
+    gtk_box_append(GTK_BOX(box_levels), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
+
+    // Group: Min
+    GtkWidget *vbox_min = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_levels), vbox_min);
+    gtk_box_append(GTK_BOX(vbox_min), gtk_label_new("Min"));
 
     viewer->spin_min = gtk_spin_button_new_with_range (-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits (GTK_SPIN_BUTTON (viewer->spin_min), 2);
-    gtk_widget_set_hexpand(viewer->spin_min, TRUE);
+    gtk_widget_set_size_request(viewer->spin_min, 100, -1);
     g_signal_connect (viewer->spin_min, "value-changed", G_CALLBACK (on_spin_min_changed), viewer);
-    gtk_box_append (GTK_BOX (row), viewer->spin_min);
+    gtk_box_append (GTK_BOX (vbox_min), viewer->spin_min);
 
     const char *min_modes[] = {"Manual", "Min Val", "1%", "2%", "5%", "10%", NULL};
     viewer->dropdown_min_mode = gtk_drop_down_new_from_strings(min_modes);
     g_signal_connect(viewer->dropdown_min_mode, "notify::selected", G_CALLBACK(on_min_mode_changed), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->dropdown_min_mode);
+    gtk_box_append(GTK_BOX(vbox_min), viewer->dropdown_min_mode);
 
-    // Max Control
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
-    gtk_box_append(GTK_BOX(row), gtk_label_new("Max"));
+    // Group: Max
+    GtkWidget *vbox_max = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_levels), vbox_max);
+    gtk_box_append(GTK_BOX(vbox_max), gtk_label_new("Max"));
 
     viewer->spin_max = gtk_spin_button_new_with_range (-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits (GTK_SPIN_BUTTON (viewer->spin_max), 2);
-    gtk_widget_set_hexpand(viewer->spin_max, TRUE);
+    gtk_widget_set_size_request(viewer->spin_max, 100, -1);
     g_signal_connect (viewer->spin_max, "value-changed", G_CALLBACK (on_spin_max_changed), viewer);
-    gtk_box_append (GTK_BOX (row), viewer->spin_max);
+    gtk_box_append (GTK_BOX (vbox_max), viewer->spin_max);
 
     const char *max_modes[] = {"Manual", "Max Val", "99%", "98%", "95%", "90%", NULL};
     viewer->dropdown_max_mode = gtk_drop_down_new_from_strings(max_modes);
     g_signal_connect(viewer->dropdown_max_mode, "notify::selected", G_CALLBACK(on_max_mode_changed), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->dropdown_max_mode);
+    gtk_box_append(GTK_BOX(vbox_max), viewer->dropdown_max_mode);
 
-    // Separator
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+    gtk_box_append(GTK_BOX(box_levels), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
-    // Thresholds Control
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
+    // Group: Thresholds
+    GtkWidget *vbox_thresh = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_levels), vbox_thresh);
 
     viewer->check_thresholds = gtk_check_button_new_with_label("Thresholds");
     g_signal_connect(viewer->check_thresholds, "toggled", G_CALLBACK(on_threshold_toggled), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->check_thresholds);
+    gtk_box_append(GTK_BOX(vbox_thresh), viewer->check_thresholds);
 
-    // Thresh Min
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
-    gtk_box_append(GTK_BOX(row), gtk_label_new("T.Min"));
+    GtkWidget *hbox_t = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_thresh), hbox_t);
 
     viewer->spin_thresh_min = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits(GTK_SPIN_BUTTON(viewer->spin_thresh_min), 2);
-    gtk_widget_set_hexpand(viewer->spin_thresh_min, TRUE);
+    gtk_widget_set_size_request(viewer->spin_thresh_min, 80, -1);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(viewer->spin_thresh_min), 0.0);
     g_signal_connect(viewer->spin_thresh_min, "value-changed", G_CALLBACK(on_thresh_min_changed), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->spin_thresh_min);
-
-    // Thresh Max
-    row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_append(GTK_BOX(viewer->vbox_controls), row);
-    gtk_box_append(GTK_BOX(row), gtk_label_new("T.Max"));
+    gtk_box_append(GTK_BOX(hbox_t), viewer->spin_thresh_min);
 
     viewer->spin_thresh_max = gtk_spin_button_new_with_range(-1e20, 1e20, 1.0);
     gtk_spin_button_set_digits(GTK_SPIN_BUTTON(viewer->spin_thresh_max), 2);
-    gtk_widget_set_hexpand(viewer->spin_thresh_max, TRUE);
+    gtk_widget_set_size_request(viewer->spin_thresh_max, 80, -1);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(viewer->spin_thresh_max), 1.0);
     g_signal_connect(viewer->spin_thresh_max, "value-changed", G_CALLBACK(on_thresh_max_changed), viewer);
-    gtk_box_append(GTK_BOX(row), viewer->spin_thresh_max);
+    gtk_box_append(GTK_BOX(hbox_t), viewer->spin_thresh_max);
+
+    // --- Tab 3: Tools ---
+    GtkWidget *box_tools = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_margin_top(box_tools, 5);
+    gtk_widget_set_margin_bottom(box_tools, 5);
+    gtk_widget_set_margin_start(box_tools, 5);
+    gtk_widget_set_margin_end(box_tools, 5);
+    gtk_notebook_append_page(GTK_NOTEBOOK(viewer->notebook_controls), box_tools, gtk_label_new("Tools"));
+
+    GtkWidget *vbox_roi = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_tools), vbox_roi);
+    gtk_box_append(GTK_BOX(vbox_roi), gtk_label_new("ROI"));
+
+    GtkWidget *hbox_roi_btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_roi), hbox_roi_btns);
+
+    viewer->btn_expand_roi = gtk_check_button_new_with_label("Expand");
+    g_signal_connect(viewer->btn_expand_roi, "toggled", G_CALLBACK(on_btn_expand_roi_toggled), viewer);
+    gtk_box_append(GTK_BOX(hbox_roi_btns), viewer->btn_expand_roi);
+
+    btn_reset = gtk_button_new_with_label ("Reset");
+    g_signal_connect (btn_reset, "clicked", G_CALLBACK (on_btn_reset_selection_clicked), viewer);
+    gtk_box_append (GTK_BOX (hbox_roi_btns), btn_reset);
 
     // Middle Paned (Images vs Right Panel)
+    // Now a child of the root VBox
     GtkWidget *paned_mid = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_paned_set_end_child(GTK_PANED(paned_root), paned_mid);
-    gtk_paned_set_resize_end_child(GTK_PANED(paned_root), TRUE);
-    gtk_paned_set_shrink_end_child(GTK_PANED(paned_root), FALSE);
+    gtk_widget_set_vexpand(paned_mid, TRUE);
+    gtk_box_append(GTK_BOX(vbox_main), paned_mid);
 
     // Images Paned (Main Image vs ROI Image)
     viewer->paned_images = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
@@ -4116,7 +4128,7 @@ activate (GtkApplication *app,
     if (viewer->fixed_max) gtk_spin_button_set_value (GTK_SPIN_BUTTON (viewer->spin_max), viewer->max_val);
 
     // Initial Controls Visibility
-    gtk_widget_set_visible(viewer->vbox_controls, FALSE);
+    gtk_widget_set_visible(viewer->notebook_controls, FALSE);
 
     viewer->fit_window = FALSE;
     viewer->flip_y = FALSE; // Default Cartesian (0,0 bottom left) with new logic

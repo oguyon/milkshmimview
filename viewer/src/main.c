@@ -133,9 +133,11 @@ typedef struct {
     double zoom_factor; // 1.0 = 100%
 
     // Stats & Histogram
-    guint32 *hist_data;
+    guint32 *hist_data; // ROI Histogram
+    guint32 *hist_data_full; // Full Image Histogram
     int hist_bins;
     guint32 hist_max_count;
+    guint32 hist_full_max_count;
     double stats_mean;
     double stats_median;
 
@@ -206,6 +208,12 @@ typedef struct {
     GtkWidget *lbl_pixel_info_main;
     GtkWidget *lbl_pixel_info_roi;
     GtkWidget *histogram_area;
+
+    // Vertical Histograms
+    GtkWidget *hist_area_left;
+    GtkWidget *hist_area_right;
+    GtkWidget *check_show_hist_left;
+    GtkWidget *check_show_hist_right;
 
     // Unified Highlight State (Histogram & Colorbar)
     gboolean highlight_active;
@@ -1247,6 +1255,73 @@ draw_color_indicator (GtkDrawingArea *area,
 
 // Drawing function for colorbar
 static void
+draw_vertical_histogram_func (GtkDrawingArea *area,
+                              cairo_t        *cr,
+                              int             width,
+                              int             height,
+                              gpointer        user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    if (!app->image || !app->hist_data) return;
+
+    // Check if we are drawing Left (Full) or Right (ROI) based on widget comparison
+    gboolean is_left = (GTK_WIDGET(area) == app->hist_area_left);
+    uint32_t *data = is_left ? app->hist_data_full : app->hist_data;
+    uint32_t max_count = is_left ? app->hist_full_max_count : app->hist_max_count;
+
+    if (!data || max_count == 0) return;
+
+    // Clear background
+    cairo_set_source_rgb(cr, 0.1, 0.1, 0.1);
+    cairo_paint(cr);
+
+    int margin_top = 20;
+    int margin_bottom = 20;
+    int plot_h = height - margin_top - margin_bottom;
+
+    if (plot_h <= 0) return;
+
+    gboolean log_scale = (app->dropdown_hist_scale && gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_hist_scale)) == 1);
+    double max_val = (double)max_count;
+    if (log_scale) max_val = log10(max_val + 1.0);
+
+    double bin_height = (double)plot_h / app->hist_bins;
+
+    // Color: Left=Greenish, Right=Reddish (ROI)
+    if (is_left) cairo_set_source_rgb(cr, 0.2, 0.8, 0.2);
+    else cairo_set_source_rgb(cr, 0.8, 0.2, 0.2);
+
+    for (int i = 0; i < app->hist_bins; ++i) {
+        double val = (double)data[i];
+        if (log_scale) val = log10(val + 1.0);
+
+        double w = (val / max_val) * width;
+
+        // Y Mapping:
+        // Colorbar: Top=Max (i=bins-1), Bottom=Min (i=0)?
+        // Wait, draw_colorbar_func:
+        // for (int y = 0; y < bar_height; y++) ... t = 1.0 - y/h ... val = (t - cmin)...
+        // So y=0 (Top) corresponds to t=1 (Max of Colormap Window).
+        // BUT `eff_max` is what we map to.
+        // compute_histogram uses `min_val` to `max_val` (which are `current_min`/`max`).
+        // So bin 0 is min, bin N is max.
+        // We want Max at Top. So bin N at y=margin_top. Bin 0 at y=height-margin_bottom.
+
+        double y = height - margin_bottom - (i + 1) * bin_height;
+
+        // Draw horizontal bar
+        if (is_left) {
+            // Grow from Right to Left
+            cairo_rectangle(cr, width - w, y, w, bin_height);
+        } else {
+            // Grow from Left to Right
+            cairo_rectangle(cr, 0, y, w, bin_height);
+        }
+        cairo_fill(cr);
+    }
+}
+
+static void
 draw_colorbar_func (GtkDrawingArea *area,
                     cairo_t        *cr,
                     int             width,
@@ -1254,6 +1329,7 @@ draw_colorbar_func (GtkDrawingArea *area,
                     gpointer        user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
+    if (!app->colorbar) return;
 
     int bar_width = 20;
     int bar_x = 5;
@@ -2828,6 +2904,39 @@ static int compare_doubles(const void *a, const void *b) {
     return (da > db) - (da < db);
 }
 
+// Helper to compute histogram
+static void compute_histogram(void *data, size_t count, int datatype, double min_val, double max_val, int bins, uint32_t *out_hist, uint32_t *out_max_count) {
+    memset(out_hist, 0, bins * sizeof(uint32_t));
+    *out_max_count = 0;
+
+    double range = max_val - min_val;
+    if (range <= 0) range = 1.0;
+
+    #define FILL_HIST_GENERIC(type) \
+        { \
+            type *ptr = (type*)data; \
+            for(size_t i=0; i<count; ++i) { \
+                int bin = (int)(((double)ptr[i] - min_val) / range * (bins - 1)); \
+                if(bin < 0) bin = 0; if(bin >= bins) bin = bins-1; \
+                out_hist[bin]++; \
+            } \
+        }
+
+    switch(datatype) {
+        case _DATATYPE_FLOAT: FILL_HIST_GENERIC(float); break;
+        case _DATATYPE_DOUBLE: FILL_HIST_GENERIC(double); break;
+        case _DATATYPE_UINT8: FILL_HIST_GENERIC(uint8_t); break;
+        case _DATATYPE_INT16: FILL_HIST_GENERIC(int16_t); break;
+        case _DATATYPE_UINT16: FILL_HIST_GENERIC(uint16_t); break;
+        case _DATATYPE_INT32: FILL_HIST_GENERIC(int32_t); break;
+        case _DATATYPE_UINT32: FILL_HIST_GENERIC(uint32_t); break;
+    }
+
+    for(int i=0; i<bins; ++i) {
+        if(out_hist[i] > *out_max_count) *out_max_count = out_hist[i];
+    }
+}
+
 // Refactored Helper for calculating limits from a buffer
 static void
 calculate_limits_from_buffer(void *data, size_t count, int datatype,
@@ -3044,37 +3153,30 @@ calculate_and_update_stats(ViewerApp *app, void *raw_data, int width, int height
         }
     }
 
-    // Calculate Histogram if enabled OR if trace is active (for heatmap)
-    gboolean show_hist = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_histogram));
+    // Calculate ROI Histogram if enabled OR if trace is active (for heatmap)
+    gboolean show_hist = (app->check_histogram && gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_histogram)));
+    gboolean show_hist_roi_vert = (app->check_show_hist_right && gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_show_hist_right)));
     gboolean trace_active = app->trace_active;
 
     // Ensure hist data allocation if needed
-    if ((show_hist || trace_active) && !app->hist_data) {
+    if ((show_hist || trace_active || show_hist_roi_vert) && !app->hist_data) {
         app->hist_bins = 256; // Fixed for now
         app->hist_data = (guint32*)calloc(app->hist_bins, sizeof(guint32));
     }
 
-    if (show_hist || trace_active) {
-        memset(app->hist_data, 0, app->hist_bins * sizeof(guint32));
-        app->hist_max_count = 0;
+    if (show_hist || trace_active || show_hist_roi_vert) {
+        // Use Global Display Range for Histogram to align with vertical histograms/colorbar
+        // But wait, the original logic used computed values? No, it uses values[i] which are raw.
+        // And binning uses disp_min/max.
+        // We can use the helper now, but we need to pass the raw ROI buffer, not the sorted double array if we want speed,
+        // OR we can pass the double array to a float/double specific helper.
+        // The helper `compute_histogram` takes `void*` and datatype.
+        // We have `values` which is `double*`.
 
-        // Use Global Display Range for Histogram
-        double disp_min = app->current_min;
-        double disp_max = app->current_max;
-        double range = disp_max - disp_min;
+        compute_histogram(values, count, _DATATYPE_DOUBLE, app->current_min, app->current_max, app->hist_bins, app->hist_data, &app->hist_max_count);
 
-        if (range <= 0) range = 1.0;
-
-        for (size_t i = 0; i < count; ++i) {
-            int bin = (int)((values[i] - disp_min) / range * (app->hist_bins - 1));
-            // Clamp to histogram bounds
-            if (bin < 0) bin = 0;
-            if (bin >= app->hist_bins) bin = app->hist_bins - 1;
-
-            app->hist_data[bin]++;
-            if (app->hist_data[bin] > app->hist_max_count) app->hist_max_count = app->hist_data[bin];
-        }
-        if (show_hist) gtk_widget_queue_draw(app->histogram_area);
+        if (show_hist && app->histogram_area) gtk_widget_queue_draw(app->histogram_area);
+        if (show_hist_roi_vert && app->hist_area_right) gtk_widget_queue_draw(app->hist_area_right);
     }
 
     double mean = sum / count;
@@ -3227,6 +3329,20 @@ draw_image (ViewerApp *app)
     app->img_width = width;
     app->img_height = height;
 
+    // Ensure bins initialized
+    if (app->hist_bins == 0) app->hist_bins = 256;
+
+    // Calculate Full Histogram if Left Vertical Histogram is enabled
+    gboolean show_hist_full = (app->check_show_hist_left && gtk_check_button_get_active(GTK_CHECK_BUTTON(app->check_show_hist_left)));
+
+    if (show_hist_full) {
+        if (!app->hist_data_full) {
+            app->hist_data_full = (guint32*)calloc(app->hist_bins, sizeof(guint32));
+        }
+        compute_histogram(raw_data, (size_t)width * height, datatype, app->current_min, app->current_max, app->hist_bins, app->hist_data_full, &app->hist_full_max_count);
+        if (app->hist_area_left) gtk_widget_queue_draw(app->hist_area_left);
+    }
+
     // Calculate Stats
     // We update stats if panel is visible OR if recording is active.
     // If recording is active (btn_stats_update checked), we push to trace.
@@ -3238,7 +3354,9 @@ draw_image (ViewerApp *app)
 
     if (app->selection_active && (stats_visible || update_trace)) {
         uint64_t cnt = is_history ? app->trace_cnt0[app->trace_cursor_idx] : app->current_cnt0;
-        calculate_and_update_stats(app, raw_data, width, height, datatype, update_trace, cnt);
+        // Check for NULL pointer before call if needed, though calculate_and_update_stats handles logic
+        if (app->btn_stats_update) // Ensure widget exists
+             calculate_and_update_stats(app, raw_data, width, height, datatype, update_trace, cnt);
     }
 
     int stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, width);
@@ -3283,7 +3401,7 @@ draw_image (ViewerApp *app)
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_max), max_val);
     }
 
-    update_spin_steps(app);
+    if (app->spin_min && app->spin_max) update_spin_steps(app);
 
     // Effective min/max for colormap
     double eff_min = min_val + app->cmap_min * (max_val - min_val);
@@ -3497,6 +3615,16 @@ activate (GtkApplication *app,
     // Group: Display (Cmap/Scale)
     GtkWidget *vbox_disp = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_box_append(GTK_BOX(box_view), vbox_disp);
+
+    // Hist Toggles
+    GtkWidget *hbox_hist_toggles = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_disp), hbox_hist_toggles);
+
+    viewer->check_show_hist_left = gtk_check_button_new_with_label("H.Left");
+    gtk_box_append(GTK_BOX(hbox_hist_toggles), viewer->check_show_hist_left);
+
+    viewer->check_show_hist_right = gtk_check_button_new_with_label("H.Right");
+    gtk_box_append(GTK_BOX(hbox_hist_toggles), viewer->check_show_hist_right);
 
     const char *cmap_opts[] = {"Grey", "Red", "Green", "Blue", "Heat", "Cool", "Rainbow", "A", "B", NULL};
     viewer->dropdown_cmap = gtk_drop_down_new_from_strings(cmap_opts);
@@ -3816,16 +3944,32 @@ activate (GtkApplication *app,
 
 
     // Right Sidebar (Colorbar + Stats)
-    hbox_right = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    hbox_right = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     viewer->hbox_right = hbox_right;
-    gtk_widget_set_margin_start(hbox_right, 10);
-    gtk_widget_set_margin_end(hbox_right, 10);
+    gtk_widget_set_margin_start(hbox_right, 5);
+    gtk_widget_set_margin_end(hbox_right, 5);
     gtk_widget_set_margin_top(hbox_right, 10);
     gtk_widget_set_margin_bottom(hbox_right, 10);
 
     gtk_paned_set_end_child(GTK_PANED(paned_mid), hbox_right);
     gtk_paned_set_resize_end_child(GTK_PANED(paned_mid), FALSE);
     gtk_paned_set_shrink_end_child(GTK_PANED(paned_mid), FALSE);
+
+    // Hist Area Left
+    viewer->hist_area_left = gtk_drawing_area_new();
+    gtk_widget_set_size_request(viewer->hist_area_left, 50, -1);
+    gtk_widget_set_vexpand(viewer->hist_area_left, TRUE);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_left), draw_vertical_histogram_func, viewer, NULL);
+    gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_left);
+    // Hide by default unless toggled? Let's check state. Actually, if check is off, drawing won't happen (if we gate in update), but better to bind visibility.
+    // For now we rely on the toggle logic. But we should set visibility.
+    // Let's bind visibility to toggles via signal or just toggle in callback.
+    // We haven't created toggles yet. They are created later in Notebook.
+    // So let's create toggles earlier or connect later. Toggles are in "View" tab.
+    // Wait, "View" tab is created before this block.
+    // Ah, `hbox_right` is created AFTER notebook.
+    // So we need to fetch the toggles from `viewer` struct which should be populated.
+    // Wait, I haven't added the toggle creation code yet. I should do that.
 
     // Colorbar Column
     GtkWidget *vbox_cbar_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
@@ -3843,6 +3987,13 @@ activate (GtkApplication *app,
     gtk_widget_add_controller(viewer->colorbar, cbar_motion);
 
     gtk_box_append (GTK_BOX (vbox_cbar_col), viewer->colorbar);
+
+    // Hist Area Right
+    viewer->hist_area_right = gtk_drawing_area_new();
+    gtk_widget_set_size_request(viewer->hist_area_right, 50, -1);
+    gtk_widget_set_vexpand(viewer->hist_area_right, TRUE);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_right), draw_vertical_histogram_func, viewer, NULL);
+    gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_right);
 
     // Reset Colorbar Small Button
     btn_reset_colorbar = gtk_button_new_with_label("R");
@@ -4224,6 +4375,7 @@ main (int    argc,
     if (viewer.raw_buffer) free(viewer.raw_buffer);
     if (viewer.history_buffer) free(viewer.history_buffer);
     if (viewer.hist_data) free(viewer.hist_data);
+    if (viewer.hist_data_full) free(viewer.hist_data_full);
     if (viewer.img_history_data) free(viewer.img_history_data);
     if (viewer.img_history_cnt0) free(viewer.img_history_cnt0);
 

@@ -52,6 +52,34 @@ enum {
     AUTO_MAX_COUNT
 };
 
+// Stream Context
+typedef struct {
+    IMAGE *image;
+    char *image_name;
+
+    // Scaling state
+    double min_val;
+    double max_val;
+    gboolean fixed_min;
+    gboolean fixed_max;
+
+    // Colormap Windowing
+    double cmap_min;
+    double cmap_max;
+
+    // Actual scaling used for display
+    double current_min;
+    double current_max;
+
+    // Palette & Scale
+    int colormap_type;
+    int scale_type;
+
+    // Auto Scale
+    int min_mode;
+    int max_mode;
+} StreamContext;
+
 // Application state
 typedef struct {
     IMAGE *image;
@@ -299,6 +327,20 @@ typedef struct {
     size_t img_history_head; // Insertion point
     size_t img_history_capacity; // In frames
     size_t img_history_frame_size; // In bytes
+
+    // Secondary Stream & Dual View
+    StreamContext streams[2];
+    int active_stream; // 0 or 1
+
+    GtkWidget *entry_sec_stream;
+    GtkWidget *btn_sec_load;
+    GtkWidget *btn_stream_toggle;
+
+    // Blink
+    GtkWidget *btn_blink;
+    GtkWidget *dropdown_blink_time;
+    guint blink_timeout_id;
+    double blink_interval;
 } ViewerApp;
 
 // Command line option variables
@@ -347,6 +389,304 @@ gboolean update_display (gpointer user_data);
 static void on_btn_autoscale_toggled (GtkToggleButton *btn, gpointer user_data);
 static void update_tbin_menu_state (ViewerApp *app);
 static void update_rms_menu_state (ViewerApp *app);
+static void on_sec_entry_changed(GtkEditable *editable, gpointer user_data);
+static void on_sec_load_clicked(GtkButton *btn, gpointer user_data);
+static void on_stream_toggle_toggled(GtkToggleButton *btn, gpointer user_data);
+static void on_blink_toggled(GtkToggleButton *btn, gpointer user_data);
+static void on_blink_time_changed(GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data);
+
+static void save_current_stream_state(ViewerApp *app) {
+    int idx = app->active_stream;
+    StreamContext *ctx = &app->streams[idx];
+
+    // Image pointer is shared/swapped
+    ctx->image = app->image;
+    // Name is managed carefully (app->image_name is strdup'd)
+    if (ctx->image_name) free(ctx->image_name);
+    ctx->image_name = app->image_name ? strdup(app->image_name) : NULL;
+
+    ctx->min_val = app->min_val;
+    ctx->max_val = app->max_val;
+    ctx->fixed_min = app->fixed_min;
+    ctx->fixed_max = app->fixed_max;
+    ctx->cmap_min = app->cmap_min;
+    ctx->cmap_max = app->cmap_max;
+    ctx->current_min = app->current_min;
+    ctx->current_max = app->current_max;
+    ctx->colormap_type = app->colormap_type;
+    ctx->scale_type = app->scale_type;
+
+    // Dropdown modes
+    if (app->dropdown_min_mode)
+        ctx->min_mode = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_min_mode));
+    if (app->dropdown_max_mode)
+        ctx->max_mode = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->dropdown_max_mode));
+}
+
+static void load_stream_state(ViewerApp *app, int idx) {
+    StreamContext *ctx = &app->streams[idx];
+    app->active_stream = idx;
+
+    app->image = ctx->image; // Pointer copy
+    if (app->image_name) free(app->image_name);
+    app->image_name = ctx->image_name ? strdup(ctx->image_name) : NULL;
+
+    app->min_val = ctx->min_val;
+    app->max_val = ctx->max_val;
+    app->fixed_min = ctx->fixed_min;
+    app->fixed_max = ctx->fixed_max;
+    app->cmap_min = ctx->cmap_min;
+    app->cmap_max = ctx->cmap_max;
+    app->current_min = ctx->current_min;
+    app->current_max = ctx->current_max;
+    app->colormap_type = ctx->colormap_type;
+    app->scale_type = ctx->scale_type;
+
+    // Restore UI
+    if (app->spin_min) gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_min), app->min_val);
+    if (app->spin_max) gtk_spin_button_set_value(GTK_SPIN_BUTTON(app->spin_max), app->max_val);
+
+    if (app->dropdown_min_mode)
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_min_mode), ctx->min_mode);
+    if (app->dropdown_max_mode)
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_max_mode), ctx->max_mode);
+
+    if (app->dropdown_cmap)
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_cmap), ctx->colormap_type);
+    if (app->dropdown_scale)
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(app->dropdown_scale), ctx->scale_type);
+
+    if (app->spin_min) gtk_widget_set_sensitive(app->spin_min, app->fixed_min);
+    if (app->spin_max) gtk_widget_set_sensitive(app->spin_max, app->fixed_max);
+
+    // Force Autoscale toggle visual update?
+    // The dropdown change triggers on_min_mode_changed which updates the toggle.
+    // So setting dropdowns should be enough.
+}
+
+static void
+on_sec_entry_changed (GtkEditable *editable, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    const char *text = gtk_editable_get_text(editable);
+
+    // Default style (or reset)
+    // We need to apply CSS classes.
+    // Red: "entry-red", Green: "entry-green", Blue: "entry-blue"
+    // Since we can't easily inline CSS on the fly without provider, assume classes are defined.
+    // Wait, I need to define CSS classes in activate or load them.
+    // I'll add them to the CSS provider in activate.
+
+    gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-red");
+    gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-green");
+    gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-blue");
+
+    if (strlen(text) == 0) return;
+
+    // Check if stream is currently loaded (Blue)
+    if (app->streams[1].image && app->streams[1].image_name && strcmp(text, app->streams[1].image_name) == 0) {
+        gtk_widget_add_css_class(GTK_WIDGET(editable), "entry-blue");
+        return;
+    }
+
+    // Check existence and size
+    IMAGE test_img;
+    if (ImageStreamIO_openIm(&test_img, text) == 0) {
+        // Exists. Check Size.
+        // Primary size:
+        // We use streams[0] as primary reference if active, or just current app->image dimensions if loaded
+        // But app->image might be Secondary.
+        // The requirement is "same size as the primary stream".
+        // Primary stream is streams[0].
+        // If streams[0] is not loaded (possible?), we can't check.
+        // Assuming streams[0] is always valid if app is running.
+
+        int p_w = 0, p_h = 0;
+        // Use streams[0] if available, else current image
+        if (app->streams[0].image) {
+            p_w = app->streams[0].image->md->size[0];
+            p_h = app->streams[0].image->md->size[1];
+        } else if (app->image) {
+            p_w = app->image->md->size[0];
+            p_h = app->image->md->size[1];
+        }
+
+        if (test_img.md->size[0] == p_w && test_img.md->size[1] == p_h) {
+            gtk_widget_add_css_class(GTK_WIDGET(editable), "entry-green");
+        } else {
+            // Exists but wrong size -> Red? Or just not Green? Prompt says "If the stream name does not exist... red".
+            // Doesn't specify wrong size color. Let's make it Red to indicate "Invalid for loading".
+            gtk_widget_add_css_class(GTK_WIDGET(editable), "entry-red");
+        }
+        ImageStreamIO_closeIm(&test_img);
+    } else {
+        gtk_widget_add_css_class(GTK_WIDGET(editable), "entry-red");
+    }
+}
+
+static void
+on_sec_load_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(app->entry_sec_stream));
+
+    if (strlen(text) == 0) return;
+
+    // Verify again
+    IMAGE test_img;
+    if (ImageStreamIO_openIm(&test_img, text) == 0) {
+        int p_w = 0, p_h = 0;
+        if (app->streams[0].image) {
+            p_w = app->streams[0].image->md->size[0];
+            p_h = app->streams[0].image->md->size[1];
+        }
+
+        if (test_img.md->size[0] == p_w && test_img.md->size[1] == p_h) {
+            ImageStreamIO_closeIm(&test_img); // Close temporary
+
+            // Load into streams[1]
+            if (app->streams[1].image) {
+                ImageStreamIO_closeIm(app->streams[1].image);
+                free(app->streams[1].image);
+                app->streams[1].image = NULL;
+            }
+            if (app->streams[1].image_name) free(app->streams[1].image_name);
+
+            app->streams[1].image = (IMAGE*)malloc(sizeof(IMAGE));
+            ImageStreamIO_openIm(app->streams[1].image, text);
+            app->streams[1].image_name = strdup(text);
+
+            // Initialize defaults if not set?
+            // "Scaling and colormaps parameters should be memorized... allowed to be different."
+            // We should probably init them to defaults or copy from primary as a starting point?
+            // Let's init to current defaults.
+            app->streams[1].min_val = app->streams[0].min_val;
+            app->streams[1].max_val = app->streams[0].max_val;
+            app->streams[1].fixed_min = app->streams[0].fixed_min;
+            app->streams[1].fixed_max = app->streams[0].fixed_max;
+            app->streams[1].cmap_min = 0.0;
+            app->streams[1].cmap_max = 1.0;
+            app->streams[1].colormap_type = COLORMAP_GREY;
+            app->streams[1].scale_type = SCALE_LINEAR;
+            app->streams[1].min_mode = AUTO_P01;
+            app->streams[1].max_mode = AUTO_MAX_P99;
+
+            // Update UI color
+            gtk_widget_remove_css_class(GTK_WIDGET(app->entry_sec_stream), "entry-green");
+            gtk_widget_remove_css_class(GTK_WIDGET(app->entry_sec_stream), "entry-red");
+            gtk_widget_add_css_class(GTK_WIDGET(app->entry_sec_stream), "entry-blue");
+
+            // If we are currently viewing Secondary, update the active view
+            if (app->active_stream == 1) {
+                app->image = app->streams[1].image;
+                if (app->image_name) free(app->image_name);
+                app->image_name = strdup(app->streams[1].image_name);
+                app->force_redraw = TRUE;
+            }
+        } else {
+            ImageStreamIO_closeIm(&test_img);
+            // Error feedback? Already red from 'changed' signal usually.
+        }
+    }
+}
+
+static void
+on_stream_toggle_toggled (GtkToggleButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gboolean active = gtk_toggle_button_get_active(btn); // True if pressed (Secondary?)
+
+    // Let's map: Active/Pressed = Secondary (1), Inactive = Primary (0)
+    int target = active ? 1 : 0;
+
+    if (target == app->active_stream) return;
+
+    // Check if secondary is loaded
+    if (target == 1 && !app->streams[1].image) {
+        // Can't switch
+        gtk_toggle_button_set_active(btn, FALSE); // Revert
+        return;
+    }
+
+    // Save current
+    save_current_stream_state(app);
+
+    // Load target
+    load_stream_state(app, target);
+
+    // Update label
+    gtk_button_set_label(GTK_BUTTON(btn), target == 1 ? "Secondary" : "Primary");
+
+    app->force_redraw = TRUE;
+}
+
+static gboolean blink_timer_func(gpointer user_data) {
+    ViewerApp *app = (ViewerApp *)user_data;
+    if (!app->blink_active) return G_SOURCE_REMOVE;
+
+    // Toggle active stream index
+    int target = (app->active_stream == 0) ? 1 : 0;
+
+    // Check if valid
+    if (target == 1 && !app->streams[1].image) target = 0;
+
+    if (target != app->active_stream) {
+        // Toggle
+        // We need to update the Toggle Button state too to keep it in sync?
+        // Or just update the view?
+        // Updating the button triggers the signal, which calls `on_stream_toggle_toggled`.
+        // So we can just set the button state.
+
+        // Block signal to prevent recursion if needed? No, signal is fine, it does the logic.
+        // But `on_stream_toggle_toggled` saves state.
+        // If we blink rapidly, saving/loading state is fine.
+
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_stream_toggle), target == 1);
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+static void
+on_blink_toggled (GtkToggleButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->blink_active = gtk_toggle_button_get_active(btn);
+
+    if (app->blink_active) {
+        if (app->blink_timeout_id > 0) g_source_remove(app->blink_timeout_id);
+
+        guint interval_ms = (guint)(app->blink_interval * 1000);
+        if (interval_ms < 10) interval_ms = 10;
+
+        app->blink_timeout_id = g_timeout_add(interval_ms, blink_timer_func, app);
+    } else {
+        if (app->blink_timeout_id > 0) {
+            g_source_remove(app->blink_timeout_id);
+            app->blink_timeout_id = 0;
+        }
+    }
+}
+
+static void
+on_blink_time_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    guint selected = gtk_drop_down_get_selected(dropdown);
+
+    // 1/8, 1/4, 1/2, 1, 2, 4, 8
+    double times[] = {0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0};
+    if (selected < 7) {
+        app->blink_interval = times[selected];
+
+        // Restart if active
+        if (app->blink_active) {
+            if (app->blink_timeout_id > 0) g_source_remove(app->blink_timeout_id);
+            guint interval_ms = (guint)(app->blink_interval * 1000);
+            app->blink_timeout_id = g_timeout_add(interval_ms, blink_timer_func, app);
+        }
+    }
+}
 
 // Helpers for Orientation
 static void update_rotation_label(ViewerApp *app) {
@@ -3851,6 +4191,41 @@ activate (GtkApplication *app,
 
     g_signal_connect(popover_rms, "map", G_CALLBACK(refresh_rms_popover), viewer);
 
+    // Group: Dual View (Secondary Stream)
+    GtkWidget *vbox_dual = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(box_view), vbox_dual);
+
+    GtkWidget *hbox_sec_load = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_dual), hbox_sec_load);
+
+    viewer->entry_sec_stream = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(viewer->entry_sec_stream), "Secondary stream");
+    gtk_widget_set_size_request(viewer->entry_sec_stream, 120, -1);
+    g_signal_connect(viewer->entry_sec_stream, "changed", G_CALLBACK(on_sec_entry_changed), viewer);
+    g_signal_connect(viewer->entry_sec_stream, "activate", G_CALLBACK(on_sec_load_clicked), viewer); // Allow Enter to load
+    gtk_box_append(GTK_BOX(hbox_sec_load), viewer->entry_sec_stream);
+
+    viewer->btn_sec_load = gtk_button_new_with_label("Load");
+    g_signal_connect(viewer->btn_sec_load, "clicked", G_CALLBACK(on_sec_load_clicked), viewer);
+    gtk_box_append(GTK_BOX(hbox_sec_load), viewer->btn_sec_load);
+
+    GtkWidget *hbox_dual_ctrl = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_dual), hbox_dual_ctrl);
+
+    viewer->btn_stream_toggle = gtk_toggle_button_new_with_label("Primary");
+    g_signal_connect(viewer->btn_stream_toggle, "toggled", G_CALLBACK(on_stream_toggle_toggled), viewer);
+    gtk_box_append(GTK_BOX(hbox_dual_ctrl), viewer->btn_stream_toggle);
+
+    viewer->btn_blink = gtk_toggle_button_new_with_label("Blink");
+    g_signal_connect(viewer->btn_blink, "toggled", G_CALLBACK(on_blink_toggled), viewer);
+    gtk_box_append(GTK_BOX(hbox_dual_ctrl), viewer->btn_blink);
+
+    const char *blink_opts[] = {"1/8s", "1/4s", "1/2s", "1s", "2s", "4s", "8s", NULL};
+    viewer->dropdown_blink_time = gtk_drop_down_new_from_strings(blink_opts);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_blink_time), 3); // 1s
+    g_signal_connect(viewer->dropdown_blink_time, "notify::selected", G_CALLBACK(on_blink_time_changed), viewer);
+    gtk_box_append(GTK_BOX(hbox_dual_ctrl), viewer->dropdown_blink_time);
+
     gtk_box_append(GTK_BOX(box_view), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
     // Group: Display (Cmap/Scale)
@@ -3957,7 +4332,10 @@ activate (GtkApplication *app,
     gtk_css_provider_load_from_string(provider,
         ".auto-scale-red:checked { background: #aa0000; color: white; border-color: #550000; }"
         ".tbin-exists { background: #2ec27e; color: white; }"
-        ".tbin-selected { background: #3584e4; color: white; font-weight: bold; }");
+        ".tbin-selected { background: #3584e4; color: white; font-weight: bold; }"
+        ".entry-red { background: #ffcccc; color: black; }"
+        ".entry-green { background: #ccffcc; color: black; }"
+        ".entry-blue { background: #ccccff; color: black; }");
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
                                                GTK_STYLE_PROVIDER(provider),
                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -4607,6 +4985,23 @@ main (int    argc,
 
     viewer.last_min_mode = AUTO_P01;
     viewer.last_max_mode = AUTO_MAX_P99;
+
+    // Initialize Primary Stream Context
+    viewer.streams[0].image = NULL; // Will be set in activate/update
+    viewer.streams[0].image_name = NULL;
+    viewer.streams[0].min_val = opt_min;
+    viewer.streams[0].max_val = opt_max;
+    viewer.streams[0].fixed_min = has_min;
+    viewer.streams[0].fixed_max = has_max;
+    viewer.streams[0].cmap_min = 0.0;
+    viewer.streams[0].cmap_max = 1.0;
+    viewer.streams[0].colormap_type = COLORMAP_GREY;
+    viewer.streams[0].scale_type = SCALE_LINEAR;
+    viewer.streams[0].min_mode = AUTO_P01;
+    viewer.streams[0].max_mode = AUTO_MAX_P99;
+
+    viewer.active_stream = 0;
+    viewer.blink_interval = 1.0;
 
     app = gtk_application_new ("org.milk.shmimview", G_APPLICATION_NON_UNIQUE);
     g_signal_connect (app, "activate", G_CALLBACK (activate), &viewer);

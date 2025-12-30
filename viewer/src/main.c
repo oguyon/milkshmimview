@@ -5069,17 +5069,24 @@ activate (GtkApplication *app,
     gtk_box_append(GTK_BOX(box_levels), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
     // Secondary Scaling Group (Hidden by default, shown in 2D Mode)
-    viewer->box_sec_scaling = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    // Horizontal layout to match other controls and prevent vertical expansion
+    viewer->box_sec_scaling = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_widget_set_visible(viewer->box_sec_scaling, FALSE);
     gtk_box_append(GTK_BOX(box_levels), viewer->box_sec_scaling);
 
-    gtk_box_append(GTK_BOX(viewer->box_sec_scaling), gtk_label_new("Sec Scaling"));
+    // Sec Header (Label + Auto)
+    GtkWidget *vbox_s_header = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(viewer->box_sec_scaling), vbox_s_header);
+
+    gtk_box_append(GTK_BOX(vbox_s_header), gtk_label_new("Sec"));
 
     // Sec Auto
     viewer->btn_sec_autoscale = gtk_toggle_button_new_with_label ("Auto");
     gtk_widget_add_css_class(viewer->btn_sec_autoscale, "auto-scale-red");
     g_signal_connect(viewer->btn_sec_autoscale, "toggled", G_CALLBACK(on_sec_autoscale_toggled), viewer);
-    gtk_box_append(GTK_BOX(viewer->box_sec_scaling), viewer->btn_sec_autoscale);
+    gtk_box_append(GTK_BOX(vbox_s_header), viewer->btn_sec_autoscale);
+
+    gtk_box_append(GTK_BOX(viewer->box_sec_scaling), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
     // Sec Min
     GtkWidget *vbox_smin = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);

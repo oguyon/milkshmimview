@@ -62,10 +62,12 @@ typedef struct {
     char *image_name;
     char *base_image_name;
     int current_tbin;
+    gboolean current_rms_mode;
     guint timeout_id;
 
-    // Time Binning UI
+    // Time Binning & RMS UI
     GtkWidget *box_tbin_btns; // Box inside popover
+    GtkWidget *box_rms_btns;
 
     // Image Data Buffer for Cairo
     guchar *display_buffer;
@@ -392,9 +394,10 @@ on_tbin_clicked (GtkButton *btn, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     int tbin = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "tbin-val"));
 
-    if (tbin == app->current_tbin) return;
+    if (tbin == app->current_tbin && !app->current_rms_mode) return;
 
     app->current_tbin = tbin;
+    app->current_rms_mode = FALSE;
 
     if (app->image_name) free(app->image_name);
 
@@ -405,6 +408,37 @@ on_tbin_clicked (GtkButton *btn, gpointer user_data)
         snprintf(buf, sizeof(buf), "%s.tbin%d", app->base_image_name, tbin);
         app->image_name = strdup(buf);
     }
+
+    // Close current image to trigger reload in update_display
+    if (app->image) {
+        ImageStreamIO_closeIm(app->image);
+        free(app->image);
+        app->image = NULL;
+    }
+
+    // Reset history buffers as stream changed
+    if (app->img_history_cnt0) memset(app->img_history_cnt0, 0, app->img_history_capacity * sizeof(uint64_t));
+    app->img_history_head = 0;
+
+    app->force_redraw = TRUE;
+}
+
+static void
+on_rms_clicked (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    int tbin = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "tbin-val"));
+
+    if (tbin == app->current_tbin && app->current_rms_mode) return;
+
+    app->current_tbin = tbin;
+    app->current_rms_mode = TRUE;
+
+    if (app->image_name) free(app->image_name);
+
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s.tbin%d.rms", app->base_image_name, tbin);
+    app->image_name = strdup(buf);
 
     // Close current image to trigger reload in update_display
     if (app->image) {
@@ -454,7 +488,47 @@ refresh_tbin_popover (GtkWidget *popover, gpointer user_data)
                 gtk_widget_remove_css_class(child, "tbin-exists");
             }
 
-            if (tbin == app->current_tbin) {
+            if (tbin == app->current_tbin && !app->current_rms_mode) {
+                gtk_widget_add_css_class(child, "tbin-selected");
+            } else {
+                gtk_widget_remove_css_class(child, "tbin-selected");
+            }
+        }
+        child = gtk_widget_get_next_sibling(child);
+    }
+}
+
+static void
+refresh_rms_popover (GtkWidget *popover, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    if (!gtk_widget_get_visible(popover)) return;
+
+    GtkWidget *child = gtk_widget_get_first_child(app->box_rms_btns);
+    while (child) {
+        if (GTK_IS_BUTTON(child)) {
+            int tbin = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(child), "tbin-val"));
+
+            gboolean exists = FALSE;
+            char buf[256];
+            snprintf(buf, sizeof(buf), "%s.tbin%d.rms", app->base_image_name, tbin);
+
+            // Check existence using ImageStreamIO_openIm
+            IMAGE test_img;
+            if (ImageStreamIO_openIm(&test_img, buf) == 0) {
+                exists = TRUE;
+                ImageStreamIO_closeIm(&test_img);
+            }
+
+            gtk_widget_set_sensitive(child, exists);
+
+            if (exists) {
+                gtk_widget_add_css_class(child, "tbin-exists");
+            } else {
+                gtk_widget_remove_css_class(child, "tbin-exists");
+            }
+
+            if (tbin == app->current_tbin && app->current_rms_mode) {
                 gtk_widget_add_css_class(child, "tbin-selected");
             } else {
                 gtk_widget_remove_css_class(child, "tbin-selected");
@@ -3722,6 +3796,33 @@ activate (GtkApplication *app,
 
     g_signal_connect(popover_tbin, "map", G_CALLBACK(refresh_tbin_popover), viewer);
 
+    // RMS Menu
+    GtkWidget *btn_rms_menu = gtk_menu_button_new();
+    gtk_button_set_label(GTK_BUTTON(btn_rms_menu), "RMS");
+    gtk_box_append(GTK_BOX(vbox_stream), btn_rms_menu);
+
+    GtkWidget *popover_rms = gtk_popover_new();
+    gtk_menu_button_set_popover(GTK_MENU_BUTTON(btn_rms_menu), popover_rms);
+
+    viewer->box_rms_btns = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_margin_top(viewer->box_rms_btns, 5);
+    gtk_widget_set_margin_bottom(viewer->box_rms_btns, 5);
+    gtk_widget_set_margin_start(viewer->box_rms_btns, 5);
+    gtk_widget_set_margin_end(viewer->box_rms_btns, 5);
+    gtk_popover_set_child(GTK_POPOVER(popover_rms), viewer->box_rms_btns);
+
+    for (int i=1; i<8; i++) { // Skip 1 for RMS
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", tbin_vals[i]);
+
+        GtkWidget *btn = gtk_button_new_with_label(buf);
+        g_object_set_data(G_OBJECT(btn), "tbin-val", GINT_TO_POINTER(tbin_vals[i]));
+        g_signal_connect(btn, "clicked", G_CALLBACK(on_rms_clicked), viewer);
+        gtk_box_append(GTK_BOX(viewer->box_rms_btns), btn);
+    }
+
+    g_signal_connect(popover_rms, "map", G_CALLBACK(refresh_rms_popover), viewer);
+
     gtk_box_append(GTK_BOX(box_view), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
 
     // Group: Display (Cmap/Scale)
@@ -4441,6 +4542,7 @@ main (int    argc,
     viewer.base_image_name = strdup(argv[1]);
     viewer.image_name = strdup(argv[1]);
     viewer.current_tbin = 1;
+    viewer.current_rms_mode = FALSE;
     viewer.min_val = opt_min;
     viewer.max_val = opt_max;
     viewer.fixed_min = has_min;

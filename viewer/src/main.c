@@ -2788,30 +2788,34 @@ draw_selection_func (GtkDrawingArea *area,
         cairo_restore(cr);
     }
 
-    // Draw Frame Counter if Controls Hidden
-    if (app->notebook_controls && !gtk_widget_get_visible(app->notebook_controls) && app->image) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "cnt: %lu", (unsigned long)app->image->md->cnt0);
+    // Draw Overlay Info (Stream Name + Frame Counter) always visible
+    if (app->image) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "%s  cnt: %lu",
+                 app->image_name ? app->image_name : "stream",
+                 (unsigned long)app->image->md->cnt0);
 
         cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-        cairo_set_font_size(cr, 14);
+        cairo_set_font_size(cr, 18);
 
         cairo_text_extents_t extents;
         cairo_text_extents(cr, buf, &extents);
 
-        double text_w = extents.width + 10;
-        double text_h = extents.height + 6;
-        double x = width - text_w - 5;
-        double y = 5;
+        double text_w = extents.width + 12;
+        double text_h = extents.height + 8;
+
+        // Position: Top Left
+        double x = 10;
+        double y = 10;
 
         // Background
-        cairo_set_source_rgba(cr, 0, 0, 0, 0.5);
+        cairo_set_source_rgba(cr, 0, 0, 0, 0.6);
         cairo_rectangle(cr, x, y, text_w, text_h);
         cairo_fill(cr);
 
         // Text
         cairo_set_source_rgb(cr, 1, 1, 0); // Yellow
-        cairo_move_to(cr, x + 5, y + text_h - 6);
+        cairo_move_to(cr, x + 6, y + text_h - 6);
         cairo_show_text(cr, buf);
     }
 }
@@ -3767,10 +3771,15 @@ activate (GtkApplication *app,
     g_signal_connect(viewer->btn_pause, "toggled", G_CALLBACK(on_pause_toggled), viewer);
     gtk_box_append(GTK_BOX(vbox_stream), viewer->btn_pause);
 
-    // Time Bin Menu
+    // Stream Selection Box (Ave / Stdev)
+    GtkWidget *hbox_stream_select = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    gtk_box_append(GTK_BOX(vbox_stream), hbox_stream_select);
+
+    // Time Bin Menu (Average)
     GtkWidget *btn_tbin_menu = gtk_menu_button_new();
-    gtk_button_set_label(GTK_BUTTON(btn_tbin_menu), "TBin");
-    gtk_box_append(GTK_BOX(vbox_stream), btn_tbin_menu);
+    gtk_button_set_label(GTK_BUTTON(btn_tbin_menu), "ave");
+    gtk_box_append(GTK_BOX(hbox_stream_select), btn_tbin_menu);
+    gtk_widget_set_hexpand(btn_tbin_menu, TRUE);
 
     GtkWidget *popover_tbin = gtk_popover_new();
     gtk_menu_button_set_popover(GTK_MENU_BUTTON(btn_tbin_menu), popover_tbin);
@@ -3796,10 +3805,11 @@ activate (GtkApplication *app,
 
     g_signal_connect(popover_tbin, "map", G_CALLBACK(refresh_tbin_popover), viewer);
 
-    // RMS Menu
+    // RMS Menu (Stdev)
     GtkWidget *btn_rms_menu = gtk_menu_button_new();
-    gtk_button_set_label(GTK_BUTTON(btn_rms_menu), "RMS");
-    gtk_box_append(GTK_BOX(vbox_stream), btn_rms_menu);
+    gtk_button_set_label(GTK_BUTTON(btn_rms_menu), "stdev");
+    gtk_box_append(GTK_BOX(hbox_stream_select), btn_rms_menu);
+    gtk_widget_set_hexpand(btn_rms_menu, TRUE);
 
     GtkWidget *popover_rms = gtk_popover_new();
     gtk_menu_button_set_popover(GTK_MENU_BUTTON(btn_rms_menu), popover_rms);
@@ -3929,7 +3939,7 @@ activate (GtkApplication *app,
     gtk_css_provider_load_from_string(provider,
         ".auto-scale-red:checked { background: #aa0000; color: white; border-color: #550000; }"
         ".tbin-exists { background: #2ec27e; color: white; }"
-        ".tbin-selected { border: 2px solid white; font-weight: bold; }");
+        ".tbin-selected { background: #3584e4; color: white; font-weight: bold; }");
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
                                                GTK_STYLE_PROVIDER(provider),
                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);

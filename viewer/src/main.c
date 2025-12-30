@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <sys/stat.h>
 
 #define TRACE_MAX_SAMPLES 360000
 #define TRACE_HIST_BINS 256
@@ -59,7 +60,11 @@ typedef struct {
     GtkWidget *scrolled_main; // Main Image Scrolled Window
     GtkWidget *colorbar;
     GtkWidget *selection_area;
-    char *image_name;
+    char image_name[256];
+    char base_image_name[256];
+    int tbin_factor;
+    GtkWidget *btn_tbin_menu;
+    GtkWidget *popover_tbin;
     guint timeout_id;
 
     // Image Data Buffer for Cairo
@@ -379,6 +384,56 @@ on_flip_y_toggled (GtkToggleButton *btn, gpointer user_data)
     ViewerApp *app = (ViewerApp *)user_data;
     app->flip_y = gtk_toggle_button_get_active(btn);
     app->force_redraw = TRUE;
+}
+
+static gboolean check_stream_exists(const char *name) {
+    char path[1024];
+    const char *dir = getenv("MILK_SHM_DIR");
+    if (!dir) dir = "/tmp";
+
+    // ImageStreamIO typically adds .im.shm
+    snprintf(path, sizeof(path), "%s/%s.im.shm", dir, name);
+
+    struct stat buffer;
+    return (stat(path, &buffer) == 0);
+}
+
+static void
+on_tbin_selected (GtkButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    int n = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "tbin_val"));
+
+    if (n == app->tbin_factor) {
+        gtk_popover_popdown(GTK_POPOVER(app->popover_tbin));
+        return;
+    }
+
+    // Construct new name
+    char new_name[256];
+    if (n == 1) {
+        snprintf(new_name, sizeof(new_name), "%s", app->base_image_name);
+    } else {
+        snprintf(new_name, sizeof(new_name), "%s.tbin%d", app->base_image_name, n);
+    }
+
+    // Switch
+    if (app->image) {
+         ImageStreamIO_closeIm(app->image);
+         free(app->image);
+         app->image = NULL;
+    }
+
+    snprintf(app->image_name, sizeof(app->image_name), "%s", new_name);
+    app->tbin_factor = n;
+    app->force_redraw = TRUE; // update_display will re-open
+
+    // Update Button Label
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Bin: %d", n);
+    gtk_menu_button_set_label(GTK_MENU_BUTTON(app->btn_tbin_menu), buf);
+
+    gtk_popover_popdown(GTK_POPOVER(app->popover_tbin));
 }
 
 static void
@@ -3600,6 +3655,39 @@ activate (GtkApplication *app,
     GtkWidget *vbox_stream = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_box_append(GTK_BOX(box_view), vbox_stream);
 
+    // Time Binning Menu
+    viewer->btn_tbin_menu = gtk_menu_button_new();
+    gtk_menu_button_set_label(GTK_MENU_BUTTON(viewer->btn_tbin_menu), "Bin: 1");
+    viewer->popover_tbin = gtk_popover_new();
+    gtk_menu_button_set_popover(GTK_MENU_BUTTON(viewer->btn_tbin_menu), viewer->popover_tbin);
+
+    GtkWidget *box_tbin = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_popover_set_child(GTK_POPOVER(viewer->popover_tbin), box_tbin);
+
+    int tbin_vals[] = {1, 2, 4, 8, 16, 32, 64, 128};
+    for (int i = 0; i < 8; i++) {
+        int n = tbin_vals[i];
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%dx", n);
+        GtkWidget *btn = gtk_button_new_with_label(buf);
+
+        // Check existence
+        char check_name[256];
+        if (n == 1) snprintf(check_name, sizeof(check_name), "%s", viewer->base_image_name);
+        else snprintf(check_name, sizeof(check_name), "%s.tbin%d", viewer->base_image_name, n);
+
+        if (check_stream_exists(check_name)) {
+            gtk_widget_add_css_class(btn, "tbin-available");
+        } else {
+            gtk_widget_set_sensitive(btn, FALSE);
+        }
+
+        g_object_set_data(G_OBJECT(btn), "tbin_val", GINT_TO_POINTER(n));
+        g_signal_connect(btn, "clicked", G_CALLBACK(on_tbin_selected), viewer);
+        gtk_box_append(GTK_BOX(box_tbin), btn);
+    }
+    gtk_box_append(GTK_BOX(vbox_stream), viewer->btn_tbin_menu);
+
     const char *fps_opts[] = {"1 Hz", "2 Hz", "5 Hz", "10 Hz", "25 Hz", "50 Hz", "100 Hz", NULL};
     viewer->dropdown_fps = gtk_drop_down_new_from_strings(fps_opts);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_fps), 4);
@@ -3711,10 +3799,11 @@ activate (GtkApplication *app,
     gtk_widget_set_margin_end(box_levels, 5);
     gtk_notebook_append_page(GTK_NOTEBOOK(viewer->notebook_controls), box_levels, gtk_label_new("Levels"));
 
-    // Add CSS for Auto Scale button
+    // Add CSS for Auto Scale button and Time Binning
     GtkCssProvider *provider = gtk_css_provider_new();
     gtk_css_provider_load_from_string(provider,
-        ".auto-scale-red:checked { background: #aa0000; color: white; border-color: #550000; }");
+        ".auto-scale-red:checked { background: #aa0000; color: white; border-color: #550000; }\n"
+        ".tbin-available { background: #00aa00; color: white; border-color: #005500; }");
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
                                                GTK_STYLE_PROVIDER(provider),
                                                GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -4324,7 +4413,10 @@ main (int    argc,
         return 1;
     }
 
-    viewer.image_name = argv[1];
+    snprintf(viewer.image_name, sizeof(viewer.image_name), "%s", argv[1]);
+    snprintf(viewer.base_image_name, sizeof(viewer.base_image_name), "%s", argv[1]);
+    viewer.tbin_factor = 1;
+
     viewer.min_val = opt_min;
     viewer.max_val = opt_max;
     viewer.fixed_min = has_min;

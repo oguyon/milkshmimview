@@ -345,6 +345,8 @@ static void get_image_screen_geometry(ViewerApp *app, int widget_w, int widget_h
 static void widget_to_image_coords(ViewerApp *app, double wx, double wy, int *ix, int *iy);
 gboolean update_display (gpointer user_data);
 static void on_btn_autoscale_toggled (GtkToggleButton *btn, gpointer user_data);
+static void update_tbin_menu_state (ViewerApp *app);
+static void update_rms_menu_state (ViewerApp *app);
 
 // Helpers for Orientation
 static void update_rotation_label(ViewerApp *app) {
@@ -420,6 +422,8 @@ on_tbin_clicked (GtkButton *btn, gpointer user_data)
     if (app->img_history_cnt0) memset(app->img_history_cnt0, 0, app->img_history_capacity * sizeof(uint64_t));
     app->img_history_head = 0;
 
+    update_tbin_menu_state(app);
+    update_rms_menu_state(app);
     app->force_redraw = TRUE;
 }
 
@@ -451,15 +455,14 @@ on_rms_clicked (GtkButton *btn, gpointer user_data)
     if (app->img_history_cnt0) memset(app->img_history_cnt0, 0, app->img_history_capacity * sizeof(uint64_t));
     app->img_history_head = 0;
 
+    update_tbin_menu_state(app);
+    update_rms_menu_state(app);
     app->force_redraw = TRUE;
 }
 
 static void
-refresh_tbin_popover (GtkWidget *popover, gpointer user_data)
+update_tbin_menu_state (ViewerApp *app)
 {
-    ViewerApp *app = (ViewerApp *)user_data;
-    if (!gtk_widget_get_visible(popover)) return;
-
     GtkWidget *child = gtk_widget_get_first_child(app->box_tbin_btns);
     while (child) {
         if (GTK_IS_BUTTON(child)) {
@@ -499,11 +502,8 @@ refresh_tbin_popover (GtkWidget *popover, gpointer user_data)
 }
 
 static void
-refresh_rms_popover (GtkWidget *popover, gpointer user_data)
+update_rms_menu_state (ViewerApp *app)
 {
-    ViewerApp *app = (ViewerApp *)user_data;
-    if (!gtk_widget_get_visible(popover)) return;
-
     GtkWidget *child = gtk_widget_get_first_child(app->box_rms_btns);
     while (child) {
         if (GTK_IS_BUTTON(child)) {
@@ -536,6 +536,22 @@ refresh_rms_popover (GtkWidget *popover, gpointer user_data)
         }
         child = gtk_widget_get_next_sibling(child);
     }
+}
+
+static void
+refresh_tbin_popover (GtkWidget *popover, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    if (!gtk_widget_get_visible(popover)) return;
+    update_tbin_menu_state(app);
+}
+
+static void
+refresh_rms_popover (GtkWidget *popover, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    if (!gtk_widget_get_visible(popover)) return;
+    update_rms_menu_state(app);
 }
 
 static void
@@ -3777,7 +3793,8 @@ activate (GtkApplication *app,
 
     // Time Bin Menu (Average)
     GtkWidget *btn_tbin_menu = gtk_menu_button_new();
-    gtk_button_set_label(GTK_BUTTON(btn_tbin_menu), "average");
+    gtk_menu_button_set_label(GTK_MENU_BUTTON(btn_tbin_menu), "average");
+    gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(btn_tbin_menu), FALSE);
     gtk_box_append(GTK_BOX(hbox_stream_select), btn_tbin_menu);
     gtk_widget_set_hexpand(btn_tbin_menu, TRUE);
 
@@ -3807,7 +3824,8 @@ activate (GtkApplication *app,
 
     // RMS Menu (Stdev)
     GtkWidget *btn_rms_menu = gtk_menu_button_new();
-    gtk_button_set_label(GTK_BUTTON(btn_rms_menu), "stddev");
+    gtk_menu_button_set_label(GTK_MENU_BUTTON(btn_rms_menu), "stddev");
+    gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(btn_rms_menu), FALSE);
     gtk_box_append(GTK_BOX(hbox_stream_select), btn_rms_menu);
     gtk_widget_set_hexpand(btn_rms_menu, TRUE);
 

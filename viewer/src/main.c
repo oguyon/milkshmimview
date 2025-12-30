@@ -2804,8 +2804,8 @@ draw_selection_func (GtkDrawingArea *area,
         double text_w = extents.width + 12;
         double text_h = extents.height + 8;
 
-        // Position: Top Left
-        double x = 10;
+        // Position: Top Right
+        double x = width - text_w - 10;
         double y = 10;
 
         // Background
@@ -3777,7 +3777,7 @@ activate (GtkApplication *app,
 
     // Time Bin Menu (Average)
     GtkWidget *btn_tbin_menu = gtk_menu_button_new();
-    gtk_button_set_label(GTK_BUTTON(btn_tbin_menu), "ave");
+    gtk_button_set_label(GTK_BUTTON(btn_tbin_menu), "average");
     gtk_box_append(GTK_BOX(hbox_stream_select), btn_tbin_menu);
     gtk_widget_set_hexpand(btn_tbin_menu, TRUE);
 
@@ -3807,7 +3807,7 @@ activate (GtkApplication *app,
 
     // RMS Menu (Stdev)
     GtkWidget *btn_rms_menu = gtk_menu_button_new();
-    gtk_button_set_label(GTK_BUTTON(btn_rms_menu), "stdev");
+    gtk_button_set_label(GTK_BUTTON(btn_rms_menu), "stddev");
     gtk_box_append(GTK_BOX(hbox_stream_select), btn_rms_menu);
     gtk_widget_set_hexpand(btn_rms_menu, TRUE);
 

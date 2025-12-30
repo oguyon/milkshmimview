@@ -341,6 +341,7 @@ typedef struct {
     GtkWidget *dropdown_blink_time;
     guint blink_timeout_id;
     double blink_interval;
+    gboolean blink_active;
 } ViewerApp;
 
 // Command line option variables

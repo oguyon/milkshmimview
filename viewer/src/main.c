@@ -202,7 +202,6 @@ typedef struct {
     gboolean trace_cursor_frozen;
 
     // UI Widgets
-    GtkWidget *lbl_counter;
     GtkWidget *dropdown_fps;
     GtkWidget *dropdown_cmap;
     GtkWidget *dropdown_scale;
@@ -295,7 +294,6 @@ typedef struct {
     GtkWidget *hbox_right;
     GtkWidget *btn_ctrl_overlay;
     GtkWidget *btn_stats_overlay;
-    GtkWidget *lbl_fps_est;
     GtkWidget *btn_pause;
     struct timespec last_fps_time;
     uint64_t last_fps_cnt;
@@ -351,6 +349,7 @@ typedef struct {
     guint blink_timeout_id;
     double blink_interval;
     gboolean blink_active;
+    double current_fps;
 } ViewerApp;
 
 // Command line option variables
@@ -3324,12 +3323,13 @@ draw_selection_func (GtkDrawingArea *area,
         cairo_restore(cr);
     }
 
-    // Draw Overlay Info (Stream Name + Frame Counter) always visible
+    // Draw Overlay Info (Stream Name + Frame Counter + FPS) always visible
     if (app->image) {
         char buf[512];
-        snprintf(buf, sizeof(buf), "%s  cnt: %lu",
+        snprintf(buf, sizeof(buf), "%s  cnt: %lu  %.1f Hz",
                  app->image_name ? app->image_name : "stream",
-                 (unsigned long)app->image->md->cnt0);
+                 (unsigned long)app->image->md->cnt0,
+                 app->current_fps);
 
         cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
         cairo_set_font_size(cr, 18);
@@ -4206,9 +4206,7 @@ update_display (gpointer user_data)
     if (dt >= 1.0) {
         double fps = (double)(app->image->md->cnt0 - app->last_fps_cnt) / dt;
         if (fps < 0) fps = 0;
-        char buf_fps[64];
-        snprintf(buf_fps, sizeof(buf_fps), "%.1f Hz", fps);
-        gtk_label_set_text(GTK_LABEL(app->lbl_fps_est), buf_fps);
+        app->current_fps = fps;
         app->last_fps_time = now;
         app->last_fps_cnt = app->image->md->cnt0;
     }
@@ -4230,11 +4228,6 @@ update_display (gpointer user_data)
         if (app->mouse_over_main) {
             update_pixel_info(app, app->lbl_pixel_info_main, app->last_mouse_x_main, app->last_mouse_y_main, FALSE);
         }
-
-        // Update counter label (only when image updates)
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Counter: %lu", last_cnt0);
-        gtk_label_set_text(GTK_LABEL(app->lbl_counter), buf);
 
         // Force redraw of selection overlay to update frame counter if control panel is hidden
         if (app->selection_area) gtk_widget_queue_draw(app->selection_area);
@@ -4283,16 +4276,6 @@ activate (GtkApplication *app,
     gtk_widget_set_margin_start(box_view, 5);
     gtk_widget_set_margin_end(box_view, 5);
     gtk_notebook_append_page(GTK_NOTEBOOK(viewer->notebook_controls), box_view, gtk_label_new("View"));
-
-    // Group: Info
-    GtkWidget *vbox_info = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_box_append(GTK_BOX(box_view), vbox_info);
-
-    viewer->lbl_counter = gtk_label_new("Cnt: 0");
-    gtk_box_append(GTK_BOX(vbox_info), viewer->lbl_counter);
-
-    viewer->lbl_fps_est = gtk_label_new("0.0 Hz");
-    gtk_box_append(GTK_BOX(vbox_info), viewer->lbl_fps_est);
 
     // Group: Stream
     GtkWidget *vbox_stream = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);

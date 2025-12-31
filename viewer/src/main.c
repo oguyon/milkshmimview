@@ -67,6 +67,9 @@ enum {
 typedef struct {
     IMAGE *image;
     char *image_name;
+    char *base_image_name;
+    int current_tbin;
+    gboolean current_rms_mode;
 
     // Scaling state
     double min_val;
@@ -105,12 +108,11 @@ typedef struct {
     GtkWidget *colorbar;
     GtkWidget *selection_area;
     char *image_name;
-    char *base_image_name;
-    int current_tbin;
-    gboolean current_rms_mode;
     guint timeout_id;
 
     // Time Binning & RMS UI
+    GtkWidget *dropdown_tbin_target;
+    int tbin_control_target; // 0 or 1
     GtkWidget *box_tbin_btns; // Box inside popover
     GtkWidget *box_rms_btns;
 
@@ -623,9 +625,13 @@ on_prim_load_clicked (GtkButton *btn, gpointer user_data)
             ImageStreamIO_openIm(app->image, text);
             app->image_name = strdup(text);
 
-            // Sync to streams[0] as well? `save` does it on toggle.
-            // But if we load and then click 'Display', we expect it to be there.
-            // Actually, `app->image` IS the primary when active.
+            // Update Base Name and Tbin State for Primary (streams[0])
+            // Since app->image maps to streams[0], we should update streams[0] metadata too?
+            // Actually streams[0] metadata is only synced on switch. But base_name is persistent.
+            if (app->streams[0].base_image_name) free(app->streams[0].base_image_name);
+            app->streams[0].base_image_name = strdup(text);
+            app->streams[0].current_tbin = 1;
+            app->streams[0].current_rms_mode = FALSE;
 
             app->force_redraw = TRUE;
         } else {
@@ -640,6 +646,11 @@ on_prim_load_clicked (GtkButton *btn, gpointer user_data)
             app->streams[0].image = (IMAGE*)malloc(sizeof(IMAGE));
             ImageStreamIO_openIm(app->streams[0].image, text);
             app->streams[0].image_name = strdup(text);
+
+            if (app->streams[0].base_image_name) free(app->streams[0].base_image_name);
+            app->streams[0].base_image_name = strdup(text);
+            app->streams[0].current_tbin = 1;
+            app->streams[0].current_rms_mode = FALSE;
         }
 
         update_stream_ui_state(app);
@@ -762,10 +773,12 @@ on_sec_load_clicked (GtkButton *btn, gpointer user_data)
             ImageStreamIO_openIm(app->streams[1].image, text);
             app->streams[1].image_name = strdup(text);
 
-            // Initialize defaults if not set?
-            // Copy defaults from current if new?
-            // For now, keep as is (copy from 0 if fresh or keep old values).
-            // Logic from previous iteration:
+            if (app->streams[1].base_image_name) free(app->streams[1].base_image_name);
+            app->streams[1].base_image_name = strdup(text);
+            app->streams[1].current_tbin = 1;
+            app->streams[1].current_rms_mode = FALSE;
+
+            // Initialize defaults if not set
             app->streams[1].min_val = app->streams[0].min_val;
             app->streams[1].max_val = app->streams[0].max_val;
             app->streams[1].fixed_min = app->streams[0].fixed_min;
@@ -921,6 +934,15 @@ on_blink_time_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_d
             app->blink_timeout_id = g_timeout_add(interval_ms, blink_timer_func, app);
         }
     }
+}
+
+static void
+on_tbin_target_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->tbin_control_target = gtk_drop_down_get_selected(dropdown); // 0 or 1
+    update_tbin_menu_state(app);
+    update_rms_menu_state(app);
 }
 
 // 2D Mode Callbacks
@@ -1163,32 +1185,59 @@ on_tbin_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     int tbin = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "tbin-val"));
+    int target = app->tbin_control_target;
+    StreamContext *ctx = &app->streams[target];
 
-    if (tbin == app->current_tbin && !app->current_rms_mode) return;
+    if (!ctx->base_image_name) return;
 
-    app->current_tbin = tbin;
-    app->current_rms_mode = FALSE;
+    if (tbin == ctx->current_tbin && !ctx->current_rms_mode) return;
 
-    if (app->image_name) free(app->image_name);
+    ctx->current_tbin = tbin;
+    ctx->current_rms_mode = FALSE;
+
+    if (ctx->image_name) free(ctx->image_name);
 
     if (tbin == 1) {
-        app->image_name = strdup(app->base_image_name);
+        ctx->image_name = strdup(ctx->base_image_name);
     } else {
         char buf[256];
-        snprintf(buf, sizeof(buf), "%s.tbin%d", app->base_image_name, tbin);
-        app->image_name = strdup(buf);
+        snprintf(buf, sizeof(buf), "%s.tbin%d", ctx->base_image_name, tbin);
+        ctx->image_name = strdup(buf);
     }
 
-    // Close current image to trigger reload in update_display
-    if (app->image) {
-        ImageStreamIO_closeIm(app->image);
-        free(app->image);
-        app->image = NULL;
-    }
+    // If we are currently displaying this stream, reload
+    if (target == app->active_stream) {
+        // Clear alias to avoid dangling pointer
+        if (ctx->image == app->image) ctx->image = NULL;
 
-    // Reset history buffers as stream changed
-    if (app->img_history_cnt0) memset(app->img_history_cnt0, 0, app->img_history_capacity * sizeof(uint64_t));
-    app->img_history_head = 0;
+        if (ctx->image == app->image) ctx->image = NULL;
+
+        if (app->image) {
+            ImageStreamIO_closeIm(app->image);
+            free(app->image);
+            app->image = NULL;
+        }
+        if (app->image_name) free(app->image_name);
+        app->image_name = strdup(ctx->image_name);
+
+        // Reset history buffers as stream changed
+        if (app->img_history_cnt0) memset(app->img_history_cnt0, 0, app->img_history_capacity * sizeof(uint64_t));
+        app->img_history_head = 0;
+    } else {
+        // Just reload the background stream image
+        if (ctx->image) {
+            ImageStreamIO_closeIm(ctx->image);
+            free(ctx->image);
+            ctx->image = NULL;
+        }
+        ctx->image = (IMAGE*)malloc(sizeof(IMAGE));
+        ImageStreamIO_openIm(ctx->image, ctx->image_name);
+
+        // If secondary stream changed and we are in 2D mode, we might need to handle buffer resize or redraw
+        if (target == 1 && app->mode_2d) {
+             // Redraw will pick up new data, but buffer size logic in draw_image handles realloc
+        }
+    }
 
     update_tbin_menu_state(app);
     update_rms_menu_state(app);
@@ -1200,28 +1249,42 @@ on_rms_clicked (GtkButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
     int tbin = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "tbin-val"));
+    int target = app->tbin_control_target;
+    StreamContext *ctx = &app->streams[target];
 
-    if (tbin == app->current_tbin && app->current_rms_mode) return;
+    if (!ctx->base_image_name) return;
 
-    app->current_tbin = tbin;
-    app->current_rms_mode = TRUE;
+    if (tbin == ctx->current_tbin && ctx->current_rms_mode) return;
 
-    if (app->image_name) free(app->image_name);
+    ctx->current_tbin = tbin;
+    ctx->current_rms_mode = TRUE;
+
+    if (ctx->image_name) free(ctx->image_name);
 
     char buf[256];
-    snprintf(buf, sizeof(buf), "%s.tbin%d.rms", app->base_image_name, tbin);
-    app->image_name = strdup(buf);
+    snprintf(buf, sizeof(buf), "%s.tbin%d.rms", ctx->base_image_name, tbin);
+    ctx->image_name = strdup(buf);
 
-    // Close current image to trigger reload in update_display
-    if (app->image) {
-        ImageStreamIO_closeIm(app->image);
-        free(app->image);
-        app->image = NULL;
+    if (target == app->active_stream) {
+        if (app->image) {
+            ImageStreamIO_closeIm(app->image);
+            free(app->image);
+            app->image = NULL;
+        }
+        if (app->image_name) free(app->image_name);
+        app->image_name = strdup(ctx->image_name);
+
+        if (app->img_history_cnt0) memset(app->img_history_cnt0, 0, app->img_history_capacity * sizeof(uint64_t));
+        app->img_history_head = 0;
+    } else {
+        if (ctx->image) {
+            ImageStreamIO_closeIm(ctx->image);
+            free(ctx->image);
+            ctx->image = NULL;
+        }
+        ctx->image = (IMAGE*)malloc(sizeof(IMAGE));
+        ImageStreamIO_openIm(ctx->image, ctx->image_name);
     }
-
-    // Reset history buffers as stream changed
-    if (app->img_history_cnt0) memset(app->img_history_cnt0, 0, app->img_history_capacity * sizeof(uint64_t));
-    app->img_history_head = 0;
 
     update_tbin_menu_state(app);
     update_rms_menu_state(app);
@@ -1231,19 +1294,62 @@ on_rms_clicked (GtkButton *btn, gpointer user_data)
 static void
 update_tbin_menu_state (ViewerApp *app)
 {
+    int target = app->tbin_control_target;
+    StreamContext *ctx = &app->streams[target];
+
     GtkWidget *child = gtk_widget_get_first_child(app->box_tbin_btns);
     while (child) {
         if (GTK_IS_BUTTON(child)) {
             int tbin = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(child), "tbin-val"));
 
             gboolean exists = FALSE;
-            if (tbin == 1) {
-                exists = TRUE;
-            } else {
-                char buf[256];
-                snprintf(buf, sizeof(buf), "%s.tbin%d", app->base_image_name, tbin);
+            if (ctx->base_image_name) {
+                if (tbin == 1) {
+                    exists = TRUE;
+                } else {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "%s.tbin%d", ctx->base_image_name, tbin);
+                    IMAGE test_img;
+                    if (ImageStreamIO_openIm(&test_img, buf) == 0) {
+                        exists = TRUE;
+                        ImageStreamIO_closeIm(&test_img);
+                    }
+                }
+            }
 
-                // Check existence using ImageStreamIO_openIm
+            gtk_widget_set_sensitive(child, exists);
+
+            if (exists) {
+                gtk_widget_add_css_class(child, "tbin-exists");
+            } else {
+                gtk_widget_remove_css_class(child, "tbin-exists");
+            }
+
+            if (tbin == ctx->current_tbin && !ctx->current_rms_mode) {
+                gtk_widget_add_css_class(child, "tbin-selected");
+            } else {
+                gtk_widget_remove_css_class(child, "tbin-selected");
+            }
+        }
+        child = gtk_widget_get_next_sibling(child);
+    }
+}
+
+static void
+update_rms_menu_state (ViewerApp *app)
+{
+    int target = app->tbin_control_target;
+    StreamContext *ctx = &app->streams[target];
+
+    GtkWidget *child = gtk_widget_get_first_child(app->box_rms_btns);
+    while (child) {
+        if (GTK_IS_BUTTON(child)) {
+            int tbin = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(child), "tbin-val"));
+
+            gboolean exists = FALSE;
+            if (ctx->base_image_name) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "%s.tbin%d.rms", ctx->base_image_name, tbin);
                 IMAGE test_img;
                 if (ImageStreamIO_openIm(&test_img, buf) == 0) {
                     exists = TRUE;
@@ -1259,44 +1365,7 @@ update_tbin_menu_state (ViewerApp *app)
                 gtk_widget_remove_css_class(child, "tbin-exists");
             }
 
-            if (tbin == app->current_tbin && !app->current_rms_mode) {
-                gtk_widget_add_css_class(child, "tbin-selected");
-            } else {
-                gtk_widget_remove_css_class(child, "tbin-selected");
-            }
-        }
-        child = gtk_widget_get_next_sibling(child);
-    }
-}
-
-static void
-update_rms_menu_state (ViewerApp *app)
-{
-    GtkWidget *child = gtk_widget_get_first_child(app->box_rms_btns);
-    while (child) {
-        if (GTK_IS_BUTTON(child)) {
-            int tbin = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(child), "tbin-val"));
-
-            gboolean exists = FALSE;
-            char buf[256];
-            snprintf(buf, sizeof(buf), "%s.tbin%d.rms", app->base_image_name, tbin);
-
-            // Check existence using ImageStreamIO_openIm
-            IMAGE test_img;
-            if (ImageStreamIO_openIm(&test_img, buf) == 0) {
-                exists = TRUE;
-                ImageStreamIO_closeIm(&test_img);
-            }
-
-            gtk_widget_set_sensitive(child, exists);
-
-            if (exists) {
-                gtk_widget_add_css_class(child, "tbin-exists");
-            } else {
-                gtk_widget_remove_css_class(child, "tbin-exists");
-            }
-
-            if (tbin == app->current_tbin && app->current_rms_mode) {
+            if (tbin == ctx->current_tbin && ctx->current_rms_mode) {
                 gtk_widget_add_css_class(child, "tbin-selected");
             } else {
                 gtk_widget_remove_css_class(child, "tbin-selected");
@@ -4704,6 +4773,13 @@ activate (GtkApplication *app,
     g_signal_connect(viewer->btn_pause, "toggled", G_CALLBACK(on_pause_toggled), viewer);
     gtk_box_append(GTK_BOX(vbox_stream), viewer->btn_pause);
 
+    // Tbin Target Selector
+    const char *tbin_targets[] = {"Primary", "Secondary", NULL};
+    viewer->dropdown_tbin_target = gtk_drop_down_new_from_strings(tbin_targets);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(viewer->dropdown_tbin_target), 0);
+    g_signal_connect(viewer->dropdown_tbin_target, "notify::selected", G_CALLBACK(on_tbin_target_changed), viewer);
+    gtk_box_append(GTK_BOX(vbox_stream), viewer->dropdown_tbin_target);
+
     // Stream Selection Box (Ave / Stdev)
     GtkWidget *hbox_stream_select = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
     gtk_box_append(GTK_BOX(vbox_stream), hbox_stream_select);
@@ -5662,10 +5738,10 @@ main (int    argc,
         return 1;
     }
 
-    viewer.base_image_name = strdup(argv[1]);
+    // viewer.base_image_name removed from struct
     viewer.image_name = strdup(argv[1]);
-    viewer.current_tbin = 1;
-    viewer.current_rms_mode = FALSE;
+    // viewer.current_tbin removed
+    // viewer.current_rms_mode removed
     viewer.min_val = opt_min;
     viewer.max_val = opt_max;
     viewer.fixed_min = has_min;
@@ -5706,6 +5782,9 @@ main (int    argc,
     // Initialize Primary Stream Context
     viewer.streams[0].image = NULL; // Will be set in activate/update
     viewer.streams[0].image_name = NULL;
+    viewer.streams[0].base_image_name = strdup(argv[1]);
+    viewer.streams[0].current_tbin = 1;
+    viewer.streams[0].current_rms_mode = FALSE;
     viewer.streams[0].min_val = opt_min;
     viewer.streams[0].max_val = opt_max;
     viewer.streams[0].fixed_min = has_min;
@@ -5718,6 +5797,7 @@ main (int    argc,
     viewer.streams[0].max_mode = AUTO_MAX_P99;
 
     viewer.active_stream = 0;
+    viewer.tbin_control_target = 0;
     viewer.blink_interval = 1.0;
 
     app = gtk_application_new ("org.milk.shmimview", G_APPLICATION_NON_UNIQUE);
@@ -5725,7 +5805,8 @@ main (int    argc,
     status = g_application_run (G_APPLICATION (app), 0, NULL);
     g_object_unref (app);
 
-    if (viewer.base_image_name) free(viewer.base_image_name);
+    if (viewer.streams[0].base_image_name) free(viewer.streams[0].base_image_name);
+    if (viewer.streams[1].base_image_name) free(viewer.streams[1].base_image_name);
     if (viewer.image_name) free(viewer.image_name);
 
     if (viewer.image) {

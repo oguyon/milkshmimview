@@ -380,6 +380,10 @@ typedef struct {
     GtkWidget *btn_mode_2d;
     GtkWidget *dropdown_2d_color;
 
+    // Merge Mode
+    gboolean mode_merge;
+    GtkWidget *btn_mode_merge;
+
     // Secondary Scaling UI (2D Mode)
     GtkWidget *box_sec_scaling;
     GtkWidget *spin_sec_min;
@@ -447,6 +451,7 @@ static void on_sec_display_clicked(GtkButton *btn, gpointer user_data);
 static void on_sec_clear_clicked(GtkButton *btn, gpointer user_data);
 static void on_blink_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_blink_time_changed(GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data);
+static void on_sec_autoscale_toggled(GtkToggleButton *btn, gpointer user_data);
 static void update_stream_ui_state(ViewerApp *app);
 
 static void save_current_stream_state(ViewerApp *app) {
@@ -540,18 +545,18 @@ static void
 update_stream_ui_state(ViewerApp *app) {
     // Update Display Buttons
     if (app->btn_prim_display) {
-        if (app->active_stream == 0) gtk_widget_add_css_class(app->btn_prim_display, "btn-green");
+        gboolean is_active = (app->active_stream == 0) || app->mode_merge;
+        if (is_active) gtk_widget_add_css_class(app->btn_prim_display, "btn-green");
         else gtk_widget_remove_css_class(app->btn_prim_display, "btn-green");
+
+        gtk_widget_set_sensitive(app->btn_prim_display, !(app->mode_2d || app->mode_merge));
     }
     if (app->btn_sec_display) {
-        if (app->active_stream == 1) gtk_widget_add_css_class(app->btn_sec_display, "btn-green");
+        gboolean is_active = (app->active_stream == 1) || app->mode_merge;
+        if (is_active) gtk_widget_add_css_class(app->btn_sec_display, "btn-green");
         else gtk_widget_remove_css_class(app->btn_sec_display, "btn-green");
 
-        // Disable secondary display button if stream not loaded?
-        // "Display button. Green if secondary is displayed, grey otherwise."
-        // Grey usually implies insensitive, but here it might just mean default color.
-        // But if no stream is loaded, it should probably be insensitive.
-        gtk_widget_set_sensitive(app->btn_sec_display, (app->streams[1].image != NULL));
+        gtk_widget_set_sensitive(app->btn_sec_display, (app->streams[1].image != NULL && !(app->mode_2d || app->mode_merge)));
     }
 
     // Update Current Stream Entries
@@ -633,6 +638,25 @@ on_prim_load_clicked (GtkButton *btn, gpointer user_data)
             app->streams[0].current_tbin = 1;
             app->streams[0].current_rms_mode = FALSE;
 
+            // Check dimensions vs Secondary
+            if (app->streams[1].image) {
+                if (app->streams[1].image->md->size[0] != app->image->md->size[0] ||
+                    app->streams[1].image->md->size[1] != app->image->md->size[1]) {
+
+                    // Invalidate secondary
+                    ImageStreamIO_closeIm(app->streams[1].image);
+                    free(app->streams[1].image);
+                    app->streams[1].image = NULL;
+                    if (app->streams[1].image_name) { free(app->streams[1].image_name); app->streams[1].image_name = NULL; }
+
+                    // If in dual mode, revert
+                    if (app->mode_2d || app->mode_merge) {
+                        if (app->mode_2d) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_2d), FALSE);
+                        if (app->mode_merge) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_merge), FALSE);
+                    }
+                }
+            }
+
             app->force_redraw = TRUE;
         } else {
             // We are viewing Secondary. Update streams[0] in background.
@@ -651,6 +675,25 @@ on_prim_load_clicked (GtkButton *btn, gpointer user_data)
             app->streams[0].base_image_name = strdup(text);
             app->streams[0].current_tbin = 1;
             app->streams[0].current_rms_mode = FALSE;
+
+            // Check dimensions vs Secondary
+            if (app->streams[1].image) {
+                if (app->streams[1].image->md->size[0] != app->streams[0].image->md->size[0] ||
+                    app->streams[1].image->md->size[1] != app->streams[0].image->md->size[1]) {
+
+                    // Invalidate secondary
+                    ImageStreamIO_closeIm(app->streams[1].image);
+                    free(app->streams[1].image);
+                    app->streams[1].image = NULL;
+                    if (app->streams[1].image_name) { free(app->streams[1].image_name); app->streams[1].image_name = NULL; }
+
+                    // If in dual mode, revert
+                    if (app->mode_2d || app->mode_merge) {
+                        if (app->mode_2d) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_2d), FALSE);
+                        if (app->mode_merge) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_merge), FALSE);
+                    }
+                }
+            }
         }
 
         update_stream_ui_state(app);
@@ -953,6 +996,9 @@ on_mode_2d_toggled (GtkToggleButton *btn, gpointer user_data)
     app->mode_2d = gtk_toggle_button_get_active(btn);
 
     if (app->mode_2d) {
+        // Mutual Exclusion
+        if (app->mode_merge) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_merge), FALSE);
+
         // Disable Blink
         if (app->blink_active) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_blink), FALSE);
         gtk_widget_set_sensitive(app->btn_blink, FALSE);
@@ -969,11 +1015,52 @@ on_mode_2d_toggled (GtkToggleButton *btn, gpointer user_data)
         gtk_widget_set_visible(app->box_sec_scaling, TRUE);
 
     } else {
-        gtk_widget_set_sensitive(app->btn_blink, TRUE);
+        if (!app->mode_merge) {
+            gtk_widget_set_sensitive(app->btn_blink, TRUE);
+            gtk_widget_set_sensitive(app->dropdown_cmap, TRUE);
+
+            // Hide Secondary Scaling
+            gtk_widget_set_visible(app->box_sec_scaling, FALSE);
+        }
+    }
+
+    update_stream_ui_state(app);
+    app->force_redraw = TRUE;
+}
+
+static void
+on_mode_merge_toggled (GtkToggleButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    app->mode_merge = gtk_toggle_button_get_active(btn);
+
+    if (app->mode_merge) {
+        // Mutual Exclusion
+        if (app->mode_2d) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_2d), FALSE);
+
+        // Disable Blink
+        if (app->blink_active) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_blink), FALSE);
+        gtk_widget_set_sensitive(app->btn_blink, FALSE);
+
+        // Force Primary Stream Active
+        if (app->active_stream != 0) {
+            switch_to_stream(app, 0);
+        }
+
+        // Enable Main Cmap Dropdown (used for primary in merge)
         gtk_widget_set_sensitive(app->dropdown_cmap, TRUE);
 
-        // Hide Secondary Scaling
-        gtk_widget_set_visible(app->box_sec_scaling, FALSE);
+        // Show Secondary Scaling
+        gtk_widget_set_visible(app->box_sec_scaling, TRUE);
+
+    } else {
+        if (!app->mode_2d) {
+            gtk_widget_set_sensitive(app->btn_blink, TRUE);
+            gtk_widget_set_sensitive(app->dropdown_cmap, TRUE);
+
+            // Hide Secondary Scaling
+            gtk_widget_set_visible(app->box_sec_scaling, FALSE);
+        }
     }
 
     update_stream_ui_state(app);
@@ -1020,7 +1107,7 @@ static void on_sec_min_mode_changed(GtkDropDown *dropdown, GParamSpec *pspec, gp
     gtk_widget_set_sensitive(app->spin_sec_min, app->streams[1].fixed_min);
 
     // Update Auto Toggle
-    g_signal_handlers_block_by_func(app->btn_sec_autoscale, on_btn_autoscale_toggled, app);
+    g_signal_handlers_block_by_func(app->btn_sec_autoscale, on_sec_autoscale_toggled, app);
 
     if (!app->streams[1].fixed_min) {
          gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_sec_autoscale), TRUE);
@@ -1031,15 +1118,8 @@ static void on_sec_min_mode_changed(GtkDropDown *dropdown, GParamSpec *pspec, gp
          gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_sec_autoscale), FALSE);
          gtk_button_set_label(GTK_BUTTON(app->btn_sec_autoscale), "Manual");
     }
-    // Note: blocking logic here is tricky since on_btn_autoscale_toggled is for Primary.
-    // I need on_sec_autoscale_toggled.
-    // The previous edit used `on_sec_autoscale_toggled` in activate.
-    // I need to define `on_sec_autoscale_toggled`.
 
-    // Correction: In activate I used `on_sec_autoscale_toggled`.
-    // So here I must block `on_sec_autoscale_toggled`.
-    // Wait, I haven't defined `on_sec_autoscale_toggled` yet. It will be defined below.
-
+    g_signal_handlers_unblock_by_func(app->btn_sec_autoscale, on_sec_autoscale_toggled, app);
     app->force_redraw = TRUE;
 }
 
@@ -1051,12 +1131,18 @@ static void on_sec_max_mode_changed(GtkDropDown *dropdown, GParamSpec *pspec, gp
     gtk_widget_set_sensitive(app->spin_sec_max, app->streams[1].fixed_max);
 
     // Update Auto Toggle logic similar to min
-    if (!app->streams[1].fixed_max) {
-         // gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_sec_autoscale), TRUE);
-         // gtk_button_set_label(GTK_BUTTON(app->btn_sec_autoscale), "Auto");
-    }
-    // Logic implementation will be handled by blocking signals in `on_sec_autoscale_toggled`.
+    g_signal_handlers_block_by_func(app->btn_sec_autoscale, on_sec_autoscale_toggled, app);
 
+    if (!app->streams[1].fixed_max) {
+         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_sec_autoscale), TRUE);
+         gtk_button_set_label(GTK_BUTTON(app->btn_sec_autoscale), "Auto");
+    }
+    if (app->streams[1].fixed_min && app->streams[1].fixed_max) {
+         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_sec_autoscale), FALSE);
+         gtk_button_set_label(GTK_BUTTON(app->btn_sec_autoscale), "Manual");
+    }
+
+    g_signal_handlers_unblock_by_func(app->btn_sec_autoscale, on_sec_autoscale_toggled, app);
     app->force_redraw = TRUE;
 }
 
@@ -1903,7 +1989,7 @@ on_min_mode_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_dat
             gtk_button_set_label(GTK_BUTTON(app->btn_autoscale), "Manual");
         }
 
-        g_signal_handlers_unblock_by_func(app->btn_autoscale, on_btn_autoscale_toggled, app);
+        g_signal_handlers_unblock_by_func(app->btn_sec_autoscale, on_sec_autoscale_toggled, app);
     }
 
     app->force_redraw = TRUE;
@@ -4360,27 +4446,39 @@ draw_image (ViewerApp *app)
         }
     }
 
-    // 2D Mode Buffer Management
-    if (app->mode_2d && app->streams[1].image) {
+    // Dual Mode Buffer Management (2D or Merge)
+    if ((app->mode_2d || app->mode_merge) && app->streams[1].image) {
         IMAGE *sec_img = app->streams[1].image;
-        size_t sec_frame_size = sec_img->md->size[0] * sec_img->md->size[1] * ImageStreamIO_typesize(sec_img->md->datatype);
 
-        if (!app->raw_buffer_sec || app->raw_buffer_sec_size < sec_frame_size) {
-            if (app->raw_buffer_sec) free(app->raw_buffer_sec);
-            app->raw_buffer_sec = malloc(sec_frame_size);
-            app->raw_buffer_sec_size = sec_frame_size;
-        }
+        // Safety Check: Dimensions must match
+        if (sec_img->md->size[0] != width || sec_img->md->size[1] != height) {
+            // Can't render dual mode if sizes differ
+            // Force disable dual mode flags to avoid crash in rendering loop
+            app->mode_2d = FALSE;
+            app->mode_merge = FALSE;
+            // Update UI? Ideally yes, but we are inside draw loop.
+            // Redraw next frame will reflect state.
+            // But we should prevent further processing this frame.
+        } else {
+            size_t sec_frame_size = sec_img->md->size[0] * sec_img->md->size[1] * ImageStreamIO_typesize(sec_img->md->datatype);
 
-        if (!app->paused) {
-             void *src_sec = NULL;
-             if (sec_img->md->imagetype & CIRCULAR_BUFFER) {
-                 if (sec_img->md->naxis == 3) {
-                     uint64_t slice_index = sec_img->md->cnt1 % sec_img->md->size[2];
-                     src_sec = (char*)sec_img->array.raw + (slice_index * sec_frame_size);
+            if (!app->raw_buffer_sec || app->raw_buffer_sec_size < sec_frame_size) {
+                if (app->raw_buffer_sec) free(app->raw_buffer_sec);
+                app->raw_buffer_sec = malloc(sec_frame_size);
+                app->raw_buffer_sec_size = sec_frame_size;
+            }
+
+            if (!app->paused) {
+                 void *src_sec = NULL;
+                 if (sec_img->md->imagetype & CIRCULAR_BUFFER) {
+                     if (sec_img->md->naxis == 3) {
+                         uint64_t slice_index = sec_img->md->cnt1 % sec_img->md->size[2];
+                         src_sec = (char*)sec_img->array.raw + (slice_index * sec_frame_size);
+                     } else src_sec = sec_img->array.raw;
                  } else src_sec = sec_img->array.raw;
-             } else src_sec = sec_img->array.raw;
 
-             if (src_sec) memcpy(app->raw_buffer_sec, src_sec, sec_frame_size);
+                 if (src_sec) memcpy(app->raw_buffer_sec, src_sec, sec_frame_size);
+            }
         }
     }
 
@@ -4495,7 +4593,7 @@ draw_image (ViewerApp *app)
     double sec_min = sec->min_val;
     double sec_max = sec->max_val;
 
-    if (app->mode_2d && sec->image && raw_data_sec) {
+    if ((app->mode_2d || app->mode_merge) && sec->image && raw_data_sec) {
         int sec_w = sec->image->md->size[0];
         int sec_h = sec->image->md->size[1];
         uint8_t sec_type = sec->image->md->datatype;
@@ -4554,7 +4652,7 @@ draw_image (ViewerApp *app)
     if (fabs(sec_eff_max - sec_eff_min) < 1e-9) sec_eff_max = sec_eff_min + 1.0;
 
     // Populate display buffer
-    gboolean dual_mode = (app->mode_2d && sec->image && raw_data_sec);
+    gboolean dual_mode = ((app->mode_2d || app->mode_merge) && sec->image && raw_data_sec);
     uint8_t sec_type = dual_mode ? sec->image->md->datatype : 0;
 
     for (int y = 0; y < height; y++) {
@@ -4599,22 +4697,22 @@ draw_image (ViewerApp *app)
                 double norm2 = (val2 - sec_eff_min) / (sec_eff_max - sec_eff_min);
                 if (norm2 < 0) norm2 = 0; if (norm2 > 1) norm2 = 1;
 
-                // Use Standard Linear scaling for Secondary color amount?
-                // Or duplicate scale type too? "All intensity scaling parameters".
-                // `StreamContext` has `scale_type`. I didn't add UI for it.
-                // Assuming Linear for secondary mix or reuse scale_type?
-                // Let's use Linear for now as I missed the Dropdown in duplications.
+                if (app->mode_2d) {
+                    get_colormap_color_2d(norm, norm2, app->mode_2d_color, &r, &g, &b);
+                } else { // Merge Mode
+                    double r1, g1, b1;
+                    get_colormap_color(norm, app->colormap_type, &r1, &g1, &b1);
 
-                get_colormap_color_2d(norm, norm2, app->mode_2d_color, &r, &g, &b);
+                    double r2, g2, b2;
+                    double norm2_s = apply_scaling(norm2, sec->scale_type);
+                    get_colormap_color(norm2_s, sec->colormap_type, &r2, &g2, &b2);
 
-                // Secondary Thresholds
-                if (sec->thresholds_enabled) {
-                    if (val2 > sec->thresh_max_val) {
-                         // What to do? 2D Map saturation is maxed (1.0).
-                         // Maybe nothing special, just clamp sat.
-                         // But for Primary thresholds we color red/blue.
-                    }
+                    r = r1 + r2; if (r > 1) r = 1;
+                    g = g1 + g2; if (g > 1) g = 1;
+                    b = b1 + b2; if (b > 1) b = 1;
                 }
+
+                // Secondary Thresholds logic could go here if needed
             } else {
                 get_colormap_color(norm, app->colormap_type, &r, &g, &b);
             }
@@ -4934,6 +5032,12 @@ activate (GtkApplication *app,
     gtk_widget_add_css_class(viewer->btn_mode_2d, "toggle-green");
     g_signal_connect(viewer->btn_mode_2d, "toggled", G_CALLBACK(on_mode_2d_toggled), viewer);
     gtk_box_append(GTK_BOX(hbox_ctrl), viewer->btn_mode_2d);
+
+    // Merge Mode Toggle
+    viewer->btn_mode_merge = gtk_toggle_button_new_with_label("Merge");
+    gtk_widget_add_css_class(viewer->btn_mode_merge, "toggle-green");
+    g_signal_connect(viewer->btn_mode_merge, "toggled", G_CALLBACK(on_mode_merge_toggled), viewer);
+    gtk_box_append(GTK_BOX(hbox_ctrl), viewer->btn_mode_merge);
 
     const char *colors_2d[] = {"Red", "Green", "Blue", "Cyan", "Magenta", "Yellow", NULL};
     viewer->dropdown_2d_color = gtk_drop_down_new_from_strings(colors_2d);

@@ -2919,27 +2919,6 @@ draw_histogram_func (GtkDrawingArea *area,
         }
     }
 
-    // Draw Stats Vertical Lines (matching trace colors)
-    // Min (Dark Blue), Max (Dark Red), P10 (Cyan), P90 (Magenta)
-    // Mean (Green) and Median (Yellow) are already drawn in SEARCH block? No, I need to check.
-    // SEARCH block contained Mean/Median lines. I need to make sure I didn't delete them.
-    // Wait, the SEARCH block above *only* replaced the overlay part at the end of function.
-    // The Mean/Median drawing was *before* the overlay logic in previous code.
-    // I should add the extra lines.
-
-    // Actually, I can't easily insert *before* the overlay if I'm replacing the overlay block.
-    // I will just add them here, they will be drawn on top of curves but below overlay if I put them before overlay code.
-    // But this Replace block is only for the overlay code.
-    // To implement "Match vertical lines... to ROI stats", I should probably add them before the overlay.
-    // Let me revise the Replace block to include the area before overlay or I'll just append them
-    // but then they might cover the overlay? No, overlay is drawn last.
-    // The SEARCH block is the overlay logic.
-    // I will add the lines *before* the overlay logic in a separate Replace if needed,
-    // or rewrite the whole function.
-    // Re-reading `draw_histogram_func` in `read_file` output:
-    // Mean/Median are drawn around lines 1320. Overlay is around 1330.
-
-    // Let's do a targeted replace for the Mean/Median section to add Min/Max/P10/P90.
 }
 
 static int

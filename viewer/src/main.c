@@ -5534,10 +5534,6 @@ activate (GtkApplication *app,
     gtk_widget_set_vexpand(viewer->hist_area_left, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_left), draw_vertical_histogram_func, viewer, NULL);
     gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_left);
-    // Initial visibility - Explicitly bind visibility to toggle state
-    // Use G_BINDING_SYNC_CREATE to ensure the widget state matches the toggle immediately
-    g_object_bind_property(viewer->check_show_hist_left, "active", viewer->hist_area_left, "visible", G_BINDING_SYNC_CREATE);
-
     // Colorbar Column
     GtkWidget *vbox_cbar_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_box_append(GTK_BOX(hbox_right), vbox_cbar_col);
@@ -5561,9 +5557,6 @@ activate (GtkApplication *app,
     gtk_widget_set_vexpand(viewer->hist_area_right, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_right), draw_vertical_histogram_func, viewer, NULL);
     gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_right);
-    // Initial visibility - Explicitly bind visibility to toggle state
-    g_object_bind_property(viewer->check_show_hist_right, "active", viewer->hist_area_right, "visible", G_BINDING_SYNC_CREATE);
-
     // Reset Colorbar Small Button
     btn_reset_colorbar = gtk_button_new_with_label("R");
     g_signal_connect(btn_reset_colorbar, "clicked", G_CALLBACK(on_btn_reset_colorbar_clicked), viewer);
@@ -5868,6 +5861,12 @@ activate (GtkApplication *app,
     update_thresh_spin_steps(viewer);
 
     update_stream_ui_state(viewer);
+
+    // Explicitly bind visibility of histograms to toggle states
+    // Moved here to ensure all widgets are fully initialized
+    g_object_bind_property(viewer->check_show_hist_left, "active", viewer->hist_area_left, "visible", G_BINDING_SYNC_CREATE);
+    g_object_bind_property(viewer->check_show_hist_right, "active", viewer->hist_area_right, "visible", G_BINDING_SYNC_CREATE);
+
     gtk_window_present (GTK_WINDOW (window));
 }
 

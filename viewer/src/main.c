@@ -4451,11 +4451,20 @@ draw_image (ViewerApp *app)
         if (sec_img->md->size[0] != width || sec_img->md->size[1] != height) {
             // Can't render dual mode if sizes differ
             // Force disable dual mode flags to avoid crash in rendering loop
+
+            // Update UI to reflect state change
+            if (app->mode_2d && app->btn_mode_2d) {
+                 gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_2d), FALSE);
+            }
+            if (app->mode_merge && app->btn_mode_merge) {
+                 gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_merge), FALSE);
+            }
+
             app->mode_2d = FALSE;
             app->mode_merge = FALSE;
-            // Update UI? Ideally yes, but we are inside draw loop.
-            // Redraw next frame will reflect state.
-            // But we should prevent further processing this frame.
+
+            // Prevent further processing this frame to avoid errors
+            return;
         } else {
             size_t sec_frame_size = sec_img->md->size[0] * sec_img->md->size[1] * ImageStreamIO_typesize(sec_img->md->datatype);
 

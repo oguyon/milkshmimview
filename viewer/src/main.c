@@ -5158,13 +5158,13 @@ activate (GtkApplication *app,
     // Add CSS for Auto Scale button and Time Bins
     GtkCssProvider *provider = gtk_css_provider_new();
     gtk_css_provider_load_from_string(provider,
-        ".auto-scale-red:checked { background: #aa0000; color: white; border-color: #550000; }"
-        ".tbin-exists { background: #2ec27e; color: white; }"
-        ".tbin-selected { background: #3584e4; color: white; font-weight: bold; }"
-        ".entry-red { background: #ffcccc; color: black; }"
-        ".entry-green { background: #ccffcc; color: black; }"
-        ".entry-blue { background: #ccccff; color: black; }"
-        ".btn-green { background: #00cc00; color: white; border-color: #006600; }"
+        ".auto-scale-red:checked { background: #aa0000; color: white; border-color: #550000; }\n"
+        ".tbin-exists { background: #2ec27e; color: white; }\n"
+        ".tbin-selected { background: #3584e4; color: white; font-weight: bold; }\n"
+        ".entry-red { background: #ffcccc; color: black; }\n"
+        ".entry-green { background: #ccffcc; color: black; }\n"
+        ".entry-blue { background: #ccccff; color: black; }\n"
+        ".btn-green { background: #00cc00; color: white; border-color: #006600; }\n"
         ".toggle-green:checked { background: #00cc00; color: white; border-color: #006600; }");
     gtk_style_context_add_provider_for_display(gdk_display_get_default(),
                                                GTK_STYLE_PROVIDER(provider),

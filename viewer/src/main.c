@@ -1313,11 +1313,35 @@ on_tbin_clicked (GtkButton *btn, gpointer user_data)
             ctx->image = NULL;
         }
         ctx->image = (IMAGE*)malloc(sizeof(IMAGE));
-        ImageStreamIO_openIm(ctx->image, ctx->image_name);
+        if (ImageStreamIO_openIm(ctx->image, ctx->image_name) != 0) {
+            free(ctx->image);
+            ctx->image = NULL;
+        }
 
         // If secondary stream changed and we are in 2D mode, we might need to handle buffer resize or redraw
-        if (target == 1 && app->mode_2d) {
-             // Redraw will pick up new data, but buffer size logic in draw_image handles realloc
+        if (target == 1 && (app->mode_2d || app->mode_merge)) {
+             if (ctx->image) {
+                 int width = app->image->md->size[0];
+                 int height = app->image->md->size[1];
+                 if (ctx->image->md->size[0] != width || ctx->image->md->size[1] != height) {
+                     if (app->mode_2d && app->btn_mode_2d) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_2d), FALSE);
+                     if (app->mode_merge && app->btn_mode_merge) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_merge), FALSE);
+                     app->mode_2d = FALSE;
+                     app->mode_merge = FALSE;
+                 } else {
+                     size_t sec_frame_size = width * height * ImageStreamIO_typesize(ctx->image->md->datatype);
+                     if (!app->raw_buffer_sec || app->raw_buffer_sec_size < sec_frame_size) {
+                        if (app->raw_buffer_sec) free(app->raw_buffer_sec);
+                        app->raw_buffer_sec = malloc(sec_frame_size);
+                        app->raw_buffer_sec_size = sec_frame_size;
+                     }
+                 }
+             } else {
+                 if (app->mode_2d && app->btn_mode_2d) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_2d), FALSE);
+                 if (app->mode_merge && app->btn_mode_merge) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_merge), FALSE);
+                 app->mode_2d = FALSE;
+                 app->mode_merge = FALSE;
+             }
         }
     }
 
@@ -1365,7 +1389,35 @@ on_rms_clicked (GtkButton *btn, gpointer user_data)
             ctx->image = NULL;
         }
         ctx->image = (IMAGE*)malloc(sizeof(IMAGE));
-        ImageStreamIO_openIm(ctx->image, ctx->image_name);
+        if (ImageStreamIO_openIm(ctx->image, ctx->image_name) != 0) {
+            free(ctx->image);
+            ctx->image = NULL;
+        }
+
+        if (target == 1 && (app->mode_2d || app->mode_merge)) {
+             if (ctx->image) {
+                 int width = app->image->md->size[0];
+                 int height = app->image->md->size[1];
+                 if (ctx->image->md->size[0] != width || ctx->image->md->size[1] != height) {
+                     if (app->mode_2d && app->btn_mode_2d) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_2d), FALSE);
+                     if (app->mode_merge && app->btn_mode_merge) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_merge), FALSE);
+                     app->mode_2d = FALSE;
+                     app->mode_merge = FALSE;
+                 } else {
+                     size_t sec_frame_size = width * height * ImageStreamIO_typesize(ctx->image->md->datatype);
+                     if (!app->raw_buffer_sec || app->raw_buffer_sec_size < sec_frame_size) {
+                        if (app->raw_buffer_sec) free(app->raw_buffer_sec);
+                        app->raw_buffer_sec = malloc(sec_frame_size);
+                        app->raw_buffer_sec_size = sec_frame_size;
+                     }
+                 }
+             } else {
+                 if (app->mode_2d && app->btn_mode_2d) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_2d), FALSE);
+                 if (app->mode_merge && app->btn_mode_merge) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->btn_mode_merge), FALSE);
+                 app->mode_2d = FALSE;
+                 app->mode_merge = FALSE;
+             }
+        }
     }
 
     update_tbin_menu_state(app);

@@ -1962,22 +1962,14 @@ static void
 on_show_hist_left_toggled (GtkCheckButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    gboolean active = gtk_check_button_get_active(btn);
-    if (app->hist_area_left) {
-        gtk_widget_set_visible(app->hist_area_left, active);
-        app->force_redraw = TRUE;
-    }
+    app->force_redraw = TRUE;
 }
 
 static void
 on_show_hist_right_toggled (GtkCheckButton *btn, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
-    gboolean active = gtk_check_button_get_active(btn);
-    if (app->hist_area_right) {
-        gtk_widget_set_visible(app->hist_area_right, active);
-        app->force_redraw = TRUE;
-    }
+    app->force_redraw = TRUE;
 }
 
 static void
@@ -5487,7 +5479,7 @@ activate (GtkApplication *app,
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_left), draw_vertical_histogram_func, viewer, NULL);
     gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_left);
     // Initial visibility
-    gtk_widget_set_visible(viewer->hist_area_left, gtk_check_button_get_active(GTK_CHECK_BUTTON(viewer->check_show_hist_left)));
+    g_object_bind_property(viewer->check_show_hist_left, "active", viewer->hist_area_left, "visible", G_BINDING_SYNC_CREATE);
 
     // Colorbar Column
     GtkWidget *vbox_cbar_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
@@ -5513,7 +5505,7 @@ activate (GtkApplication *app,
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_right), draw_vertical_histogram_func, viewer, NULL);
     gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_right);
     // Initial visibility
-    gtk_widget_set_visible(viewer->hist_area_right, gtk_check_button_get_active(GTK_CHECK_BUTTON(viewer->check_show_hist_right)));
+    g_object_bind_property(viewer->check_show_hist_right, "active", viewer->hist_area_right, "visible", G_BINDING_SYNC_CREATE);
 
     // Reset Colorbar Small Button
     btn_reset_colorbar = gtk_button_new_with_label("R");

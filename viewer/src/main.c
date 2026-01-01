@@ -4639,14 +4639,9 @@ draw_image (ViewerApp *app)
     double eff_max = min_val + app->cmap_max * (max_val - min_val);
     if (fabs(eff_max - eff_min) < 1e-9) eff_max = eff_min + 1.0;
 
-    // Effective min/max for Secondary (ignoring cmap windowing for now? Or applying it?)
-    // Prompt doesn't specify windowing for Secondary, only "intensity scaling parameters".
-    // Let's assume cmap windowing is PRIMARY only feature (Mouse Drag).
-    // Or we duplicate it? "All of the intensity scaling parameters should be duplicated".
-    // I duplicated min/max/auto/thresholds. Cmap windowing is not in the duplicated UI box.
-    // So assume full range for Secondary 0..1 map.
-    double sec_eff_min = sec_min;
-    double sec_eff_max = sec_max;
+    // Effective min/max for Secondary
+    double sec_eff_min = sec_min + sec->cmap_min * (sec_max - sec_min);
+    double sec_eff_max = sec_min + sec->cmap_max * (sec_max - sec_min);
     if (fabs(sec_eff_max - sec_eff_min) < 1e-9) sec_eff_max = sec_eff_min + 1.0;
 
     // Populate display buffer

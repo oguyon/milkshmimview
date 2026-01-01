@@ -4030,6 +4030,42 @@ static int compare_doubles(const void *a, const void *b) {
     return (da > db) - (da < db);
 }
 
+static int compare_floats(const void *a, const void *b) {
+    float da = *(const float *)a;
+    float db = *(const float *)b;
+    return (da > db) - (da < db);
+}
+
+static int compare_uint8(const void *a, const void *b) {
+    uint8_t da = *(const uint8_t *)a;
+    uint8_t db = *(const uint8_t *)b;
+    return (da > db) - (da < db);
+}
+
+static int compare_int16(const void *a, const void *b) {
+    int16_t da = *(const int16_t *)a;
+    int16_t db = *(const int16_t *)b;
+    return (da > db) - (da < db);
+}
+
+static int compare_uint16(const void *a, const void *b) {
+    uint16_t da = *(const uint16_t *)a;
+    uint16_t db = *(const uint16_t *)b;
+    return (da > db) - (da < db);
+}
+
+static int compare_int32(const void *a, const void *b) {
+    int32_t da = *(const int32_t *)a;
+    int32_t db = *(const int32_t *)b;
+    return (da > db) - (da < db);
+}
+
+static int compare_uint32(const void *a, const void *b) {
+    uint32_t da = *(const uint32_t *)a;
+    uint32_t db = *(const uint32_t *)b;
+    return (da > db) - (da < db);
+}
+
 // Helper to compute histogram
 static void compute_histogram(void *data, size_t count, int datatype, double min_val, double max_val, int bins, uint32_t *out_hist, uint32_t *out_max_count) {
     memset(out_hist, 0, bins * sizeof(uint32_t));
@@ -4270,34 +4306,44 @@ calculate_and_update_stats(ViewerApp *app, void *raw_data, int width, int height
     if (roi_w <= 0 || roi_h <= 0) return;
 
     size_t count = roi_w * roi_h;
-    double *values = (double *)malloc(count * sizeof(double));
-    if (!values) return;
+    size_t typesize = ImageStreamIO_typesize(datatype);
+    void *roi_data = malloc(count * typesize);
+    if (!roi_data) return;
 
-    size_t idx = 0;
+    // Copy ROI Data
+    for (int y = 0; y < roi_h; y++) {
+        void *src = (char*)raw_data + ((y1 + y) * width + x1) * typesize;
+        void *dst = (char*)roi_data + (y * roi_w) * typesize;
+        memcpy(dst, src, roi_w * typesize);
+    }
+
     double sum = 0;
     double min_v = 1e30;
     double max_v = -1e30;
 
-    // First pass for min/max/sum/values
-    for (int y = y1; y < y2; y++) {
-        for (int x = x1; x < x2; x++) {
-            int i = y * width + x;
-            double val = 0;
-            switch (datatype) {
-                case _DATATYPE_FLOAT: val = ((float*)raw_data)[i]; break;
-                case _DATATYPE_DOUBLE: val = ((double*)raw_data)[i]; break;
-                case _DATATYPE_UINT8: val = ((uint8_t*)raw_data)[i]; break;
-                case _DATATYPE_INT16: val = ((int16_t*)raw_data)[i]; break;
-                case _DATATYPE_UINT16: val = ((uint16_t*)raw_data)[i]; break;
-                case _DATATYPE_INT32: val = ((int32_t*)raw_data)[i]; break;
-                case _DATATYPE_UINT32: val = ((uint32_t*)raw_data)[i]; break;
-                default: val = 0; break;
-            }
-            values[idx++] = val;
-            sum += val;
-            if (val < min_v) min_v = val;
-            if (val > max_v) max_v = val;
+    // Compute Min/Max/Sum
+    #define CALC_STATS(type) \
+        { \
+            type *ptr = (type*)roi_data; \
+            for(size_t i=0; i<count; ++i) { \
+                double val = (double)ptr[i]; \
+                sum += val; \
+                if (val < min_v) min_v = val; \
+                if (val > max_v) max_v = val; \
+            } \
         }
+
+    switch (datatype) {
+        case _DATATYPE_FLOAT: CALC_STATS(float); break;
+        case _DATATYPE_DOUBLE: CALC_STATS(double); break;
+        case _DATATYPE_UINT8: CALC_STATS(uint8_t); break;
+        case _DATATYPE_INT16: CALC_STATS(int16_t); break;
+        case _DATATYPE_UINT16: CALC_STATS(uint16_t); break;
+        case _DATATYPE_INT32: CALC_STATS(int32_t); break;
+        case _DATATYPE_UINT32: CALC_STATS(uint32_t); break;
+        default:
+            sum = 0; min_v = 0; max_v = 0;
+            break;
     }
 
     // Calculate ROI Histogram if enabled OR if trace is active (for heatmap)
@@ -4313,31 +4359,55 @@ calculate_and_update_stats(ViewerApp *app, void *raw_data, int width, int height
 
     if (show_hist || trace_active || show_hist_roi_vert) {
         // Use Global Display Range for Histogram to align with vertical histograms/colorbar
-        // But wait, the original logic used computed values? No, it uses values[i] which are raw.
-        // And binning uses disp_min/max.
-        // We can use the helper now, but we need to pass the raw ROI buffer, not the sorted double array if we want speed,
-        // OR we can pass the double array to a float/double specific helper.
-        // The helper `compute_histogram` takes `void*` and datatype.
-        // We have `values` which is `double*`.
-
-        compute_histogram(values, count, _DATATYPE_DOUBLE, app->current_min, app->current_max, app->hist_bins, app->hist_data, &app->hist_max_count);
+        compute_histogram(roi_data, count, datatype, app->current_min, app->current_max, app->hist_bins, app->hist_data, &app->hist_max_count);
 
         if (show_hist && app->histogram_area) gtk_widget_queue_draw(app->histogram_area);
         if (show_hist_roi_vert && app->hist_area_right) gtk_widget_queue_draw(app->hist_area_right);
     }
 
-    double mean = sum / count;
+    double mean = (count > 0) ? (sum / count) : 0;
 
-    qsort(values, count, sizeof(double), compare_doubles);
+    // Sort for Median/Percentiles
+    switch (datatype) {
+        case _DATATYPE_FLOAT: qsort(roi_data, count, sizeof(float), compare_floats); break;
+        case _DATATYPE_DOUBLE: qsort(roi_data, count, sizeof(double), compare_doubles); break;
+        case _DATATYPE_UINT8: qsort(roi_data, count, sizeof(uint8_t), compare_uint8); break;
+        case _DATATYPE_INT16: qsort(roi_data, count, sizeof(int16_t), compare_int16); break;
+        case _DATATYPE_UINT16: qsort(roi_data, count, sizeof(uint16_t), compare_uint16); break;
+        case _DATATYPE_INT32: qsort(roi_data, count, sizeof(int32_t), compare_int32); break;
+        case _DATATYPE_UINT32: qsort(roi_data, count, sizeof(uint32_t), compare_uint32); break;
+        default: break;
+    }
 
-    double median = values[count / 2];
-    double p01 = values[(size_t)(count * 0.1)];
-    double p09 = values[(size_t)(count * 0.9)];
+    double median = 0;
+    double p01 = 0;
+    double p09 = 0;
+
+    #define EXTRACT_PERCENTILES(type) \
+        { \
+            type *ptr = (type*)roi_data; \
+            median = (double)ptr[count / 2]; \
+            p01 = (double)ptr[(size_t)(count * 0.1)]; \
+            p09 = (double)ptr[(size_t)(count * 0.9)]; \
+        }
+
+    if (count > 0) {
+        switch (datatype) {
+            case _DATATYPE_FLOAT: EXTRACT_PERCENTILES(float); break;
+            case _DATATYPE_DOUBLE: EXTRACT_PERCENTILES(double); break;
+            case _DATATYPE_UINT8: EXTRACT_PERCENTILES(uint8_t); break;
+            case _DATATYPE_INT16: EXTRACT_PERCENTILES(int16_t); break;
+            case _DATATYPE_UINT16: EXTRACT_PERCENTILES(uint16_t); break;
+            case _DATATYPE_INT32: EXTRACT_PERCENTILES(int32_t); break;
+            case _DATATYPE_UINT32: EXTRACT_PERCENTILES(uint32_t); break;
+            default: break;
+        }
+    }
 
     app->stats_mean = mean;
     app->stats_median = median;
 
-    free(values);
+    free(roi_data);
 
     char buf[64];
     snprintf(buf, sizeof(buf), "%.4g", min_v);

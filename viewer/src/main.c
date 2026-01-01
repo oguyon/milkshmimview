@@ -579,17 +579,20 @@ update_stream_ui_state(ViewerApp *app) {
 static void
 on_prim_entry_changed (GtkEditable *editable, gpointer user_data)
 {
-    // ViewerApp *app = (ViewerApp *)user_data;
-    // Wait, currently loaded primary?
-    // Validation logic similar to sec.
-
+    ViewerApp *app = (ViewerApp *)user_data;
     const char *text = gtk_editable_get_text(editable);
 
     gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-red");
     gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-green");
-    // gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-blue"); // Blue is for "Loaded".
+    gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-blue");
 
     if (strlen(text) == 0) return;
+
+    // Check if stream is currently loaded (Blue)
+    if (app->streams[0].image_name && strcmp(text, app->streams[0].image_name) == 0) {
+        gtk_widget_add_css_class(GTK_WIDGET(editable), "entry-blue");
+        return;
+    }
 
     // Check existence
     IMAGE test_img;
@@ -698,22 +701,10 @@ on_prim_load_clicked (GtkButton *btn, gpointer user_data)
 
         update_stream_ui_state(app);
 
-        // Set Blue on input?
-        // "When loaded, the text box will turn blue."
+        // Set Blue on input
         gtk_widget_remove_css_class(GTK_WIDGET(app->entry_prim_stream), "entry-green");
         gtk_widget_remove_css_class(GTK_WIDGET(app->entry_prim_stream), "entry-red");
-        // gtk_widget_add_css_class(GTK_WIDGET(app->entry_prim_stream), "entry-blue");
-        // Wait, "entry-blue" is for "Matches loaded".
-        // If I type "stream1", load it. It becomes loaded.
-        // on_prim_entry_changed should check this?
-        // Let's rely on re-triggering validation or just set it here?
-        // If user types, it goes back to Green/Red.
-        // Let's set it here.
-        // Actually, `on_sec_load_clicked` sets it.
-        // But `on_sec_entry_changed` resets it.
-
-        // I should update `on_prim_entry_changed` to check loaded status too?
-        // Yes, similar to sec.
+        gtk_widget_add_css_class(GTK_WIDGET(app->entry_prim_stream), "entry-blue");
     }
 }
 
@@ -724,12 +715,6 @@ on_sec_entry_changed (GtkEditable *editable, gpointer user_data)
     const char *text = gtk_editable_get_text(editable);
 
     // Default style (or reset)
-    // We need to apply CSS classes.
-    // Red: "entry-red", Green: "entry-green", Blue: "entry-blue"
-    // Since we can't easily inline CSS on the fly without provider, assume classes are defined.
-    // Wait, I need to define CSS classes in activate or load them.
-    // I'll add them to the CSS provider in activate.
-
     gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-red");
     gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-green");
     gtk_widget_remove_css_class(GTK_WIDGET(editable), "entry-blue");

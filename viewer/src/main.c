@@ -589,7 +589,18 @@ on_prim_entry_changed (GtkEditable *editable, gpointer user_data)
     if (strlen(text) == 0) return;
 
     // Check if stream is currently loaded (Blue)
-    if (app->streams[0].image_name && strcmp(text, app->streams[0].image_name) == 0) {
+    IMAGE *curr_img = NULL;
+    const char *curr_name = NULL;
+
+    if (app->active_stream == 0) {
+        curr_img = app->image;
+        curr_name = app->image_name;
+    } else {
+        curr_img = app->streams[0].image;
+        curr_name = app->streams[0].image_name;
+    }
+
+    if (curr_img && curr_name && strcmp(text, curr_name) == 0) {
         gtk_widget_add_css_class(GTK_WIDGET(editable), "entry-blue");
         return;
     }

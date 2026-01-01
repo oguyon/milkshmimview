@@ -1963,6 +1963,28 @@ on_hist_scale_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_d
 }
 
 static void
+on_show_hist_left_toggled (GtkCheckButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gboolean active = gtk_check_button_get_active(btn);
+    if (app->hist_area_left) {
+        gtk_widget_set_visible(app->hist_area_left, active);
+        app->force_redraw = TRUE;
+    }
+}
+
+static void
+on_show_hist_right_toggled (GtkCheckButton *btn, gpointer user_data)
+{
+    ViewerApp *app = (ViewerApp *)user_data;
+    gboolean active = gtk_check_button_get_active(btn);
+    if (app->hist_area_right) {
+        gtk_widget_set_visible(app->hist_area_right, active);
+        app->force_redraw = TRUE;
+    }
+}
+
+static void
 on_min_mode_changed (GtkDropDown *dropdown, GParamSpec *pspec, gpointer user_data)
 {
     ViewerApp *app = (ViewerApp *)user_data;
@@ -5056,9 +5078,11 @@ activate (GtkApplication *app,
     gtk_box_append(GTK_BOX(vbox_disp), hbox_hist_toggles);
 
     viewer->check_show_hist_left = gtk_check_button_new_with_label("H.Left");
+    g_signal_connect(viewer->check_show_hist_left, "toggled", G_CALLBACK(on_show_hist_left_toggled), viewer);
     gtk_box_append(GTK_BOX(hbox_hist_toggles), viewer->check_show_hist_left);
 
     viewer->check_show_hist_right = gtk_check_button_new_with_label("H.Right");
+    g_signal_connect(viewer->check_show_hist_right, "toggled", G_CALLBACK(on_show_hist_right_toggled), viewer);
     gtk_box_append(GTK_BOX(hbox_hist_toggles), viewer->check_show_hist_right);
 
     const char *cmap_opts[] = {"Grey", "Red", "Green", "Blue", "Heat", "Cool", "Rainbow", "A", "B", NULL};
@@ -5478,15 +5502,8 @@ activate (GtkApplication *app,
     gtk_widget_set_vexpand(viewer->hist_area_left, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_left), draw_vertical_histogram_func, viewer, NULL);
     gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_left);
-    // Hide by default unless toggled? Let's check state. Actually, if check is off, drawing won't happen (if we gate in update), but better to bind visibility.
-    // For now we rely on the toggle logic. But we should set visibility.
-    // Let's bind visibility to toggles via signal or just toggle in callback.
-    // We haven't created toggles yet. They are created later in Notebook.
-    // So let's create toggles earlier or connect later. Toggles are in "View" tab.
-    // Wait, "View" tab is created before this block.
-    // Ah, `hbox_right` is created AFTER notebook.
-    // So we need to fetch the toggles from `viewer` struct which should be populated.
-    // Wait, I haven't added the toggle creation code yet. I should do that.
+    // Initial visibility
+    gtk_widget_set_visible(viewer->hist_area_left, gtk_check_button_get_active(GTK_CHECK_BUTTON(viewer->check_show_hist_left)));
 
     // Colorbar Column
     GtkWidget *vbox_cbar_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
@@ -5511,6 +5528,8 @@ activate (GtkApplication *app,
     gtk_widget_set_vexpand(viewer->hist_area_right, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_right), draw_vertical_histogram_func, viewer, NULL);
     gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_right);
+    // Initial visibility
+    gtk_widget_set_visible(viewer->hist_area_right, gtk_check_button_get_active(GTK_CHECK_BUTTON(viewer->check_show_hist_right)));
 
     // Reset Colorbar Small Button
     btn_reset_colorbar = gtk_button_new_with_label("R");

@@ -5532,8 +5532,11 @@ activate (GtkApplication *app,
     viewer->hist_area_left = gtk_drawing_area_new();
     gtk_widget_set_size_request(viewer->hist_area_left, 50, -1);
     gtk_widget_set_vexpand(viewer->hist_area_left, TRUE);
+    // Explicitly hide by default to match toggle state
+    gtk_widget_set_visible(viewer->hist_area_left, FALSE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_left), draw_vertical_histogram_func, viewer, NULL);
     gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_left);
+
     // Colorbar Column
     GtkWidget *vbox_cbar_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_box_append(GTK_BOX(hbox_right), vbox_cbar_col);
@@ -5555,6 +5558,8 @@ activate (GtkApplication *app,
     viewer->hist_area_right = gtk_drawing_area_new();
     gtk_widget_set_size_request(viewer->hist_area_right, 50, -1);
     gtk_widget_set_vexpand(viewer->hist_area_right, TRUE);
+    // Explicitly hide by default to match toggle state
+    gtk_widget_set_visible(viewer->hist_area_right, FALSE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(viewer->hist_area_right), draw_vertical_histogram_func, viewer, NULL);
     gtk_box_append(GTK_BOX(hbox_right), viewer->hist_area_right);
     // Reset Colorbar Small Button

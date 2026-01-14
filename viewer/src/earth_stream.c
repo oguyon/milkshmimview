@@ -5,99 +5,129 @@
 #include <time.h>
 #include <unistd.h>
 #include <string.h>
+#include <getopt.h>
 
-#define WIDTH 256
-#define HEIGHT 256
-#define RADIUS 100.0
-#define CX 127.5
-#define CY 127.5
-#define FPS 100
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
-// Simple hash for noise
-unsigned int hash(unsigned int x) {
-    x = ((x >> 16) ^ x) * 0x45d9f3b;
-    x = ((x >> 16) ^ x) * 0x45d9f3b;
-    x = (x >> 16) ^ x;
-    return x;
-}
+// Default FPS
+#define DEFAULT_FPS 100
 
-float noise(float x, float y, float z) {
-    int xi = (int)floor(x);
-    int yi = (int)floor(y);
-    int zi = (int)floor(z);
+typedef enum {
+    ROTATION_MODE_FIXED,
+    ROTATION_MODE_OSCILLATING
+} RotationMode;
 
-    float xf = x - xi;
-    float yf = y - yi;
-    float zf = z - zi;
-
-    // Smoothstep
-    float u = xf * xf * (3.0f - 2.0f * xf);
-    float v = yf * yf * (3.0f - 2.0f * yf);
-    float w = zf * zf * (3.0f - 2.0f * zf);
-
-    // Hash coords
-    #define H(a,b,c) (hash((unsigned int)(a) + hash((unsigned int)(b) + hash((unsigned int)(c)))))
-
-    unsigned int aaa = H(xi,   yi,   zi);
-    unsigned int baa = H(xi+1, yi,   zi);
-    unsigned int aba = H(xi,   yi+1, zi);
-    unsigned int bba = H(xi+1, yi+1, zi);
-    unsigned int aab = H(xi,   yi,   zi+1);
-    unsigned int bab = H(xi+1, yi,   zi+1);
-    unsigned int abb = H(xi,   yi+1, zi+1);
-    unsigned int bbb = H(xi+1, yi+1, zi+1);
-
-    // Mix
-    float x1 = (1.0f - u) * (aaa & 255) + u * (baa & 255);
-    float x2 = (1.0f - u) * (aba & 255) + u * (bba & 255);
-    float y1 = (1.0f - v) * x1 + v * x2;
-
-    float x3 = (1.0f - u) * (aab & 255) + u * (bab & 255);
-    float x4 = (1.0f - u) * (abb & 255) + u * (bbb & 255);
-    float y2 = (1.0f - v) * x3 + v * x4;
-
-    return ((1.0f - w) * y1 + w * y2) / 255.0f;
-}
-
-float fbm(float x, float y, float z) {
-    float total = 0.0f;
-    float frequency = 1.0f;
-    float amplitude = 0.5f;
-    float maxVal = 0.0f;
-
-    for (int i = 0; i < 4; i++) {
-        total += noise(x * frequency, y * frequency, z * frequency) * amplitude;
-        maxVal += amplitude;
-        amplitude *= 0.5f;
-        frequency *= 2.0f;
-    }
-    return total / maxVal;
+void print_help(const char* prog_name) {
+    printf("Usage: %s [options] [stream_name]\n", prog_name);
+    printf("Options:\n");
+    printf("  -h          Show this help message\n");
+    printf("  -s <speed>  Rotation speed (radians per frame, default: 0.02)\n");
+    printf("  -m <mode>   Rotation mode: 0 for fixed, 1 for oscillating (default: 1)\n");
+    printf("  -a <angle>  Tilt angle in degrees for fixed mode (default: 0.0)\n");
+    printf("  -w <width>  Image width (default: 256)\n");
+    printf("  -e <height> Image height (default: 256)\n");
+    printf("  -f <fps>    Framerate in Hz (default: 100)\n");
+    printf("\n");
+    printf("Default stream name: 'earth'\n");
 }
 
 int main(int argc, char **argv) {
+    // Defaults
     const char *stream_name = "earth";
-    if (argc > 1) stream_name = argv[1];
+    int width = 256;
+    int height = 256;
+    float speed = 0.02f;
+    RotationMode mode = ROTATION_MODE_OSCILLATING;
+    float fixed_tilt_deg = 0.0f;
+    int fps = DEFAULT_FPS;
+    
+    int opt;
+    while ((opt = getopt(argc, argv, "hs:m:a:w:e:f:")) != -1) {
+        switch (opt) {
+            case 'h':
+                print_help(argv[0]);
+                return 0;
+            case 's':
+                speed = strtof(optarg, NULL);
+                break;
+            case 'm':
+                if (atoi(optarg) == 0) mode = ROTATION_MODE_FIXED;
+                else mode = ROTATION_MODE_OSCILLATING;
+                break;
+            case 'a':
+                fixed_tilt_deg = strtof(optarg, NULL);
+                break;
+            case 'w':
+                width = atoi(optarg);
+                break;
+            case 'e':
+                height = atoi(optarg);
+                break;
+            case 'f':
+                fps = atoi(optarg);
+                if (fps <= 0) fps = 1;
+                break;
+            default:
+                print_help(argv[0]);
+                return 1;
+        }
+    }
+
+    // Check for positional arg (stream name)
+    if (optind < argc) {
+        stream_name = argv[optind];
+    }
+    
+    // Dynamic geometry calculation
+    float cx = width / 2.0f - 0.5f;
+    float cy = height / 2.0f - 0.5f;
+    // Radius is slightly smaller than half the min dimension
+    float radius = (width < height ? width : height) / 2.0f * 0.78f; // ~100.0 for 256
+
+    // Load Earth Map
+    int map_w, map_h, map_ch;
+    unsigned char *map_data = NULL;
+    
+    // Try to locate the map file in likely locations
+    const char* paths[] = {
+        "earth_map.jpg",
+        "viewer/src/earth_map.jpg",
+        "src/earth_map.jpg",
+        "../viewer/src/earth_map.jpg",
+        "../src/earth_map.jpg"
+    };
+    
+    for (int i = 0; i < 5; i++) {
+        map_data = stbi_load(paths[i], &map_w, &map_h, &map_ch, 3);
+        if (map_data) {
+            printf("Loaded Earth map from %s: %dx%d (%d channels)\n", paths[i], map_w, map_h, map_ch);
+            break;
+        }
+    }
+
+    if (!map_data) {
+        fprintf(stderr, "Failed to load earth_map.jpg from any standard path.\n");
+        return 1;
+    }
 
     IMAGE image;
-    uint32_t dims[2] = {WIDTH, HEIGHT};
+    uint32_t dims[2] = {(uint32_t)width, (uint32_t)height};
 
     // Create shared memory image
     // 2D, Float, Shared=1, NBkw=0, CBsize=0
     if (ImageStreamIO_createIm(&image, stream_name, 2, dims, _DATATYPE_FLOAT, 1, 0, 0) != 0) {
         fprintf(stderr, "Error creating stream %s\n", stream_name);
+        stbi_image_free(map_data);
         return 1;
     }
 
-    printf("Stream %s created. Press Ctrl+C to stop.\n", stream_name);
+    printf("Stream '%s' created (%dx%d) at %d FPS. Press Ctrl+C to stop.\n", stream_name, width, height, fps);
 
     float rotation = 0.0f;
-    float speed = 0.02f; // Rad per frame
-
-    // Period = 50 rotations
-    // 1 rotation = 2*PI
-    // Frames per rotation = 2*PI / speed
-    // Period in frames = 50 * (2*PI / speed)
-    float tilt_speed = (2.0f * M_PI) / (50.0f * (2.0f * M_PI / speed));
+    
+    // Period = 50 rotations for full tilt cycle if oscillating
+    float tilt_speed = (2.0f * M_PI) / (50.0f * (2.0f * M_PI / (speed > 0 ? speed : 0.02f)));
     float tilt_phase = 0.0f;
 
     // Light direction (from top left front)
@@ -111,26 +141,36 @@ int main(int argc, char **argv) {
     while(1) {
         float *data = (float*)image.array.raw;
 
-        // Tilt between 0 and 90 degrees (0 to PI/2 radians)
-        // Sine wave: 45 + 45 * sin(phase) -> 0..90 deg
-        float tilt_deg = 45.0f + 45.0f * sin(tilt_phase);
+        float tilt_deg;
+        if (mode == ROTATION_MODE_OSCILLATING) {
+            // Tilt between 0 and 90 degrees (0 to PI/2 radians)
+            tilt_deg = 45.0f + 45.0f * sin(tilt_phase);
+        } else {
+            tilt_deg = fixed_tilt_deg;
+        }
+        
         float tilt_rad = tilt_deg * (M_PI / 180.0f);
 
-        for (int y = 0; y < HEIGHT; y++) {
-            for (int x = 0; x < WIDTH; x++) {
-                float dx = x - CX;
-                float dy = y - CY;
+        float cos_t = cos(tilt_rad);
+        float sin_t = sin(tilt_rad);
+        float cos_r = cos(rotation);
+        float sin_r = sin(rotation);
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                float dx = x - cx;
+                float dy = y - cy;
                 float r2 = dx*dx + dy*dy;
 
-                if (r2 > RADIUS*RADIUS) {
-                    data[y * WIDTH + x] = 0.0f;
+                if (r2 > radius*radius) {
+                    data[y * width + x] = 0.0f;
                 } else {
-                    float z = sqrt(RADIUS*RADIUS - r2);
+                    float z = sqrt(radius*radius - r2);
 
                     // Normalize sphere normal
-                    float nx = dx / RADIUS;
-                    float ny = dy / RADIUS;
-                    float nz = z / RADIUS;
+                    float nx = dx / radius;
+                    float ny = dy / radius;
+                    float nz = z / radius;
 
                     // Lighting (Diffuse)
                     float dot = nx * lx + ny * ly + nz * lz;
@@ -141,27 +181,46 @@ int main(int argc, char **argv) {
                     // 1. Rotate for Tilt (Around X axis)
                     // y' = y*cos(t) - z*sin(t)
                     // z' = y*sin(t) + z*cos(t)
-                    float ny_t = ny * cos(tilt_rad) - nz * sin(tilt_rad);
-                    float nz_t = ny * sin(tilt_rad) + nz * cos(tilt_rad);
+                    float ny_t = ny * cos_t - nz * sin_t;
+                    float nz_t = ny * sin_t + nz * cos_t;
                     float nx_t = nx;
 
                     // 2. Rotate for Spin (Around Y axis)
-                    float px = nx_t * cos(rotation) - nz_t * sin(rotation);
+                    // x'' = x'*cos(r) - z'*sin(r)
+                    // z'' = x'*sin(r) + z'*cos(r)
+                    float px = nx_t * cos_r - nz_t * sin_r;
                     float py = ny_t;
-                    float pz = nx_t * sin(rotation) + nz_t * cos(rotation);
+                    float pz = nx_t * sin_r + nz_t * cos_r;
 
-                    // Sample noise
-                    float freq = 3.0f;
-                    float val = fbm(px * freq + 10.0f, py * freq + 10.0f, pz * freq + 10.0f);
+                    // Spherical Mapping
+                    // u = 0.5 + atan2(pz, px) / (2PI)
+                    // v = 0.5 - asin(py) / PI
+                    
+                    float u = 0.5f + atan2f(pz, px) / (2.0f * M_PI);
+                    float v = 0.5f - asinf(py) / M_PI; 
+                    
+                    // Flip right/left coordinates
+                    u = 1.0f - u;
 
-                    // Continent threshold
-                    if (val < 0.5f) val = 0.1f; // Ocean
-                    else val = val * 1.5f; // Land
+                    // Clamp/Wrap (atan2 handles wrap, asin handles clamp implicitly)
+                    if (u < 0) u += 1.0f;
+                    if (u > 1) u -= 1.0f;
+                    if (v < 0) v = 0.0f;
+                    if (v > 1) v = 1.0f;
+
+                    // Map to texture pixels
+                    int tx = (int)(u * (map_w - 1));
+                    int ty = (int)(v * (map_h - 1));
+
+                    int idx = (ty * map_w + tx) * 3;
+                    
+                    // Grayscale conversion
+                    float val = (0.299f * map_data[idx] + 0.587f * map_data[idx+1] + 0.114f * map_data[idx+2]) / 255.0f;
 
                     // Apply lighting
                     val *= (0.2f + 0.8f * dot);
 
-                    data[y * WIDTH + x] = val;
+                    data[y * width + x] = val;
                 }
             }
         }
@@ -171,8 +230,9 @@ int main(int argc, char **argv) {
 
         rotation += speed;
         tilt_phase += tilt_speed;
-        usleep(1000000 / FPS);
+        usleep(1000000 / fps);
     }
-
+    
+    stbi_image_free(map_data);
     return 0;
 }
